@@ -1,0 +1,16 @@
+# Dependencies
+node_modules/
+
+# Environment variables — Supabase URL/keys, etc. Never commit these.
+.env
+.env.local
+.env.*.local
+
+# Build output
+dist/
+.vite/
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+*.log
