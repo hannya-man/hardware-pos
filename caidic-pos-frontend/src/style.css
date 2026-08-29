@@ -1,0 +1,377 @@
+/* ===========================================================================
+   TOKENS — named, not guessed. Grounded in the hardware store itself:
+   concrete/galvanized surfaces, safety-equipment orange, hazard-stripe
+   yellow, warm ink instead of pure black. System font stacks only — this
+   has to render on first paint even fully offline, no webfont CDN.
+=========================================================================== */
+:root {
+  --surface-warm: #F4F1E9;   /* page background — concrete, not stark white */
+  --paper: #FFFFFF;          /* card surfaces — "receipt paper" */
+  --ink: #201D1A;            /* text — warm near-black, not pure #000 */
+  --ink-soft: #6B655A;
+  --steel: #23262B;          /* dark panel — sidebar, header accents */
+  --steel-line: #383C42;
+  --safety-orange: #E85D04;  /* the one loud accent — Charge, active states */
+  --safety-orange-soft: #FBE4D3;
+  --hazard-yellow: #F2B705;  /* sparing — warnings, low stock only */
+  --hazard-yellow-soft: #FBEEC3;
+  --rule: #DAD4C6;           /* hairlines on warm background */
+  --success: #2F6B3A;
+  --success-soft: #E1EEE3;
+  --danger: #B3261E;
+  --danger-soft: #F6E2E0;
+
+  --font-display: ui-monospace, "SFMono-Regular", "Cascadia Mono", "Consolas", "Roboto Mono", monospace;
+  --font-body: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+
+  --radius: 8px;
+}
+
+* { box-sizing: border-box; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
+}
+
+body {
+  margin: 0;
+  background: var(--surface-warm);
+  color: var(--ink);
+  font-family: var(--font-body);
+}
+
+[hidden] { display: none !important; }
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+button:focus-visible,
+input:focus-visible {
+  outline: 3px solid var(--safety-orange);
+  outline-offset: 2px;
+}
+
+/* Hazard-stripe accent — used exactly twice: login card top, app header
+   top. Not repeated anywhere else — one motif, not a pattern. */
+.hazard-edge {
+  height: 5px;
+  background: repeating-linear-gradient(
+    -45deg,
+    var(--hazard-yellow), var(--hazard-yellow) 10px,
+    var(--steel) 10px, var(--steel) 20px
+  );
+}
+
+/* ===========================================================================
+   LOGIN
+=========================================================================== */
+#loginScreen {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--steel);
+  padding: 24px;
+}
+.login-card {
+  background: var(--paper);
+  border-radius: var(--radius);
+  overflow: hidden;
+  width: 100%;
+  max-width: 440px;
+}
+.login-card > .login-body { padding: 32px; }
+.login-brand { text-align: center; margin-bottom: 24px; }
+.login-brand .name {
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 20px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+.login-brand .sub { font-size: 13px; color: var(--ink-soft); margin-top: 4px; }
+
+.staff-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+/* Staff cards read like duplicate stamped ID tags — a clipped corner
+   instead of a rounded box, role shown as a small colored tab rather than
+   a badge chip. */
+.staff-card {
+  background: var(--surface-warm);
+  border: 1.5px solid var(--rule);
+  clip-path: polygon(0 0, calc(100% - 12px) 0, 100% 12px, 100% 100%, 0 100%);
+  padding: 16px 12px 12px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  transition: border-color 120ms, background 120ms;
+}
+.staff-card:hover { border-color: var(--safety-orange); background: var(--safety-orange-soft); }
+.staff-card .av {
+  width: 42px; height: 42px; border-radius: 50%;
+  background: var(--steel); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-weight: 700; font-size: 13px;
+}
+.staff-card .nm { font-weight: 600; font-size: 13.5px; text-align: center; }
+.staff-card .rl {
+  font-family: var(--font-display);
+  font-size: 10px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; padding: 2px 8px; border-radius: 999px;
+  background: var(--steel); color: #fff;
+}
+.staff-card[data-role="owner"] .rl,
+.staff-card .rl.owner { background: var(--safety-orange); }
+
+.pin-pad-wrap { text-align: center; }
+.pin-back {
+  background: none; border: none; color: var(--ink-soft);
+  font-size: 13px; font-weight: 600; margin-bottom: 16px;
+}
+.pin-selected { display: flex; flex-direction: column; align-items: center; gap: 8px; margin-bottom: 18px; }
+.pin-selected .av {
+  width: 52px; height: 52px; border-radius: 50%;
+  background: var(--steel); color: #fff;
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-weight: 700;
+}
+.pin-selected .nm { font-weight: 700; font-size: 15px; }
+.pin-dots { display: flex; justify-content: center; gap: 12px; margin-bottom: 22px; }
+.pin-dots span { width: 14px; height: 14px; border-radius: 50%; border: 1.5px solid var(--rule); transition: background 100ms; }
+.pin-dots span.filled { background: var(--steel); border-color: var(--steel); }
+.keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; max-width: 260px; margin: 0 auto; }
+.keypad button {
+  padding: 16px 0; border-radius: var(--radius); border: 1px solid var(--rule);
+  background: var(--paper); font-family: var(--font-display);
+  font-size: 18px; font-weight: 700;
+  transition: background 100ms, border-color 100ms;
+}
+.keypad button:hover { background: var(--safety-orange-soft); border-color: var(--safety-orange); }
+.keypad button.wide { font-family: var(--font-body); font-size: 13px; font-weight: 600; color: var(--ink-soft); }
+.login-error { color: var(--danger); font-size: 13px; text-align: center; margin-top: 14px; min-height: 16px; font-weight: 600; }
+
+/* ===========================================================================
+   APP SHELL
+=========================================================================== */
+#appShell { display: flex; min-height: 100vh; }
+.sidebar { width: 220px; background: var(--steel); color: #fff; display: flex; flex-direction: column; flex: none; }
+.brand {
+  padding: 20px 18px; font-family: var(--font-display); font-weight: 700;
+  font-size: 14px; letter-spacing: 0.04em; text-transform: uppercase;
+  border-bottom: 1px solid var(--steel-line);
+}
+.sidebar-foot { margin-top: auto; padding: 14px; border-top: 1px solid var(--steel-line); }
+.user-card { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.user-card .av {
+  width: 32px; height: 32px; border-radius: 50%; background: var(--safety-orange);
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--font-display); font-size: 11px; font-weight: 700;
+}
+.user-card .nm { font-size: 13px; font-weight: 600; }
+.user-card .rl { font-size: 11px; color: #B7BEC7; text-transform: uppercase; letter-spacing: 0.04em; }
+#logoutBtn {
+  width: 100%; padding: 10px; border-radius: 6px; border: 1px solid var(--steel-line);
+  background: none; color: #C6D0E0; font-size: 12.5px; font-weight: 600;
+  transition: background 100ms;
+}
+#logoutBtn:hover { background: var(--steel-line); }
+
+.app-main { flex: 1; display: flex; flex-direction: column; }
+.app-header {
+  background: var(--paper); border-bottom: 1px solid var(--rule);
+  padding: 16px 24px; display: flex; align-items: center; justify-content: space-between;
+}
+.app-header h1 {
+  font-family: var(--font-display); font-size: 14px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase; margin: 0;
+}
+#statusPill {
+  display: flex; align-items: center; gap: 7px; padding: 7px 13px; border-radius: 999px;
+  background: var(--success-soft); color: var(--success); font-size: 12.5px; font-weight: 700;
+  border: none; font-family: var(--font-display); text-transform: uppercase; letter-spacing: 0.03em;
+}
+#statusPill.offline { background: var(--hazard-yellow-soft); color: #7A5B03; }
+#statusPill .dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
+.view-body { padding: 20px; flex: 1; }
+
+.card { background: var(--paper); border-radius: var(--radius); box-shadow: 0 1px 2px rgba(32,29,26,.06); padding: 18px; }
+.card h2 {
+  font-family: var(--font-display); font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  color: var(--ink-soft); text-transform: uppercase; margin: 18px 0 12px;
+}
+.card h2:first-child { margin-top: 0; }
+
+.billing-grid { display: grid; grid-template-columns: 1.5fr 1fr; gap: 18px; align-items: start; }
+@media (max-width: 900px) { .billing-grid { grid-template-columns: 1fr; } }
+
+.search-box { display: flex; background: var(--surface-warm); border: 1px solid var(--rule); border-radius: var(--radius); padding: 12px 14px; }
+.search-box input { border: none; outline: none; flex: 1; font-size: 14px; background: transparent; color: var(--ink); }
+#searchResults { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 0; }
+.search-hit {
+  padding: 11px 13px; background: var(--surface-warm); border: 1px solid var(--rule);
+  border-radius: 6px; text-align: left; font-size: 13.5px; display: flex; justify-content: space-between;
+}
+.search-hit:hover { border-color: var(--safety-orange); }
+
+/* Product tiles — clipped corner like a die-cut bin label. Price always in
+   the display (monospace) face, the one place price-tag typography shows
+   up outside the receipt itself. */
+.grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.qkey {
+  text-align: left; background: var(--paper); border: 1.5px solid var(--rule);
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%);
+  padding: 13px; display: flex; flex-direction: column; gap: 8px;
+  transition: border-color 120ms, transform 80ms;
+}
+.qkey:hover { border-color: var(--safety-orange); }
+.qkey:active { transform: translateY(1px); }
+.qkey .nm { font-size: 13px; font-weight: 600; line-height: 1.3; }
+.qkey .pr { font-family: var(--font-display); font-size: 13px; font-weight: 700; color: var(--safety-orange); }
+
+/* Cart / receipt — the signature element. Torn top edge sitting on the
+   page background, dotted leaders between name and price, monospace
+   amounts, like a printed strip actually being built. */
+#ticketCard { padding: 0; overflow: hidden; }
+.torn-edge {
+  height: 11px;
+  background-image:
+    linear-gradient(135deg, var(--surface-warm) 6px, transparent 0),
+    linear-gradient(-135deg, var(--surface-warm) 6px, transparent 0);
+  background-size: 12px 12px;
+  background-repeat: repeat-x;
+  background-position: top left;
+}
+#ticketCard .ticket-inner { padding: 6px 18px 18px; }
+.ticket-head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 4px; }
+.ticket-head .num {
+  font-family: var(--font-display); font-size: 12px; font-weight: 700;
+  letter-spacing: 0.06em; text-transform: uppercase; color: var(--ink-soft);
+}
+
+.line { display: flex; align-items: baseline; gap: 8px; padding: 10px 0; border-bottom: 1px dashed var(--rule); animation: line-in 150ms ease-out; }
+@keyframes line-in { from { opacity: 0; transform: translateY(-2px); } to { opacity: 1; transform: none; } }
+.line .nm { font-size: 13.5px; font-weight: 500; white-space: nowrap; }
+.line .leader { flex: 1; border-bottom: 1px dotted var(--rule); margin-bottom: 4px; min-width: 12px; }
+.line .qty { font-family: var(--font-display); font-size: 11.5px; color: var(--ink-soft); }
+.line .amt { font-family: var(--font-display); font-weight: 700; font-size: 13.5px; }
+.line button {
+  border: none; background: var(--danger-soft); color: var(--danger);
+  border-radius: 50%; width: 22px; height: 22px; font-size: 11px; flex: none;
+}
+.empty-ticket { text-align: center; color: var(--ink-soft); font-size: 13.5px; padding: 34px 0; }
+
+.totals { margin-top: 6px; padding-top: 10px; border-top: 1px solid var(--rule); display: flex; flex-direction: column; gap: 6px; }
+.totals .row { display: flex; justify-content: space-between; font-size: 13px; color: var(--ink-soft); font-family: var(--font-display); }
+.totals .row.grand {
+  padding-top: 10px; margin-top: 4px; border-top: 1px dashed var(--rule);
+  font-size: 22px; font-weight: 700; color: var(--ink);
+}
+.ticket-actions { margin-top: 18px; }
+#chargeBtn {
+  width: 100%; padding: 15px; border: none; border-radius: var(--radius);
+  background: var(--safety-orange); color: #fff; font-weight: 700; font-size: 14.5px;
+  font-family: var(--font-display); letter-spacing: 0.03em; text-transform: uppercase;
+  transition: transform 80ms, background 100ms;
+}
+#chargeBtn:hover:not(:disabled) { background: #CC4E02; }
+#chargeBtn:active:not(:disabled) { transform: translateY(1px); }
+#chargeBtn:disabled { opacity: .35; cursor: not-allowed; }
+
+/* ===========================================================================
+   SIDEBAR NAV — role-filtered on the client for display only; every route
+   behind these is enforced server-side by its own Gate regardless of what
+   this menu shows.
+=========================================================================== */
+.nav-items { flex: 1; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
+.nav-item {
+  display: flex; align-items: center; gap: 10px; padding: 11px 12px; border-radius: 6px;
+  background: none; border: none; color: #C6D0E0; font-size: 13px; font-weight: 500; text-align: left;
+}
+.nav-item:hover { background: var(--steel-line); color: #fff; }
+.nav-item.active { background: var(--safety-orange); color: #fff; }
+
+/* ===========================================================================
+   DATA TABLES — used across Activity, Shifts, Analytics, Staff
+=========================================================================== */
+.data-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
+.data-table th {
+  text-align: left; font-family: var(--font-display); font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase; color: var(--ink-soft);
+  padding: 8px 10px; border-bottom: 1.5px solid var(--rule);
+}
+.data-table td { padding: 10px 10px; border-bottom: 1px dashed var(--rule); vertical-align: middle; }
+.data-table tbody tr:hover { background: var(--surface-warm); }
+.data-table tr.clickable-row { cursor: pointer; }
+.data-table .amt-cell { font-family: var(--font-display); font-weight: 700; }
+.data-table .empty-row td { text-align: center; color: var(--ink-soft); padding: 24px; }
+
+/* ===========================================================================
+   FORMS — Returns, Reconciliation, Staff
+=========================================================================== */
+.form-row { margin-bottom: 16px; }
+.form-row label { display: block; font-size: 12.5px; font-weight: 700; margin-bottom: 6px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; }
+.form-row input[type="text"], .form-row input[type="number"], .form-row textarea, .form-row select {
+  width: 100%; padding: 11px 12px; border: 1px solid var(--rule); border-radius: 6px; font-size: 14px;
+  font-family: inherit; background: var(--surface-warm); color: var(--ink);
+}
+.form-row textarea { resize: vertical; }
+.radio-row { display: flex; gap: 18px; font-size: 13.5px; }
+.radio-row label { display: flex; align-items: center; gap: 6px; text-transform: none; font-weight: 500; }
+.selected-chip {
+  padding: 10px 12px; background: var(--surface-warm); border: 1px dashed var(--rule);
+  border-radius: 6px; font-size: 13.5px; color: var(--ink-soft);
+}
+.form-row-inline { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.form-row-inline input, .form-row-inline select {
+  padding: 10px 12px; border: 1px solid var(--rule); border-radius: 6px; font-size: 13.5px; background: var(--surface-warm);
+}
+.form-status { margin-top: 10px; font-size: 13px; font-weight: 600; min-height: 18px; }
+.form-status.ok { color: var(--success); }
+.form-status.err { color: var(--danger); }
+
+.btn-primary {
+  padding: 12px 20px; border: none; border-radius: 6px; background: var(--safety-orange);
+  color: #fff; font-weight: 700; font-size: 13.5px; font-family: var(--font-display);
+  text-transform: uppercase; letter-spacing: 0.03em;
+}
+.btn-primary:hover { background: #CC4E02; }
+.btn-secondary {
+  padding: 10px 16px; border: 1px solid var(--rule); border-radius: 6px; background: var(--paper);
+  color: var(--ink); font-weight: 600; font-size: 13px; margin-bottom: 14px;
+}
+.btn-secondary:hover { border-color: var(--safety-orange); }
+.btn-void {
+  padding: 6px 12px; border: 1px solid var(--danger); border-radius: 6px; background: var(--danger-soft);
+  color: var(--danger); font-weight: 700; font-size: 11.5px;
+}
+
+.filter-row { display: flex; gap: 10px; margin-bottom: 6px; }
+
+.counter-row { display: flex; gap: 14px; margin-bottom: 8px; }
+.counter-box {
+  flex: 1; background: var(--surface-warm); border: 1px dashed var(--rule); border-radius: 8px;
+  padding: 16px; display: flex; flex-direction: column; gap: 4px;
+}
+.counter-box .lbl { font-family: var(--font-display); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink-soft); }
+.counter-box .val { font-family: var(--font-display); font-size: 26px; font-weight: 700; color: var(--ink); }
+
+.cycle-input { width: 90px; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 5px; font-family: var(--font-display); }
+.variance-ok { color: var(--success); font-weight: 700; }
+.variance-bad { color: var(--danger); font-weight: 700; }
+
+/* ===========================================================================
+   MODAL — the PIN-confirm overlay for owner-gated server actions
+=========================================================================== */
+.overlay { position: fixed; inset: 0; background: rgba(32,29,26,.55); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 30; }
+.modal { background: var(--paper); border-radius: var(--radius); padding: 24px; width: 100%; max-width: 340px; }
+.modal h3 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
+.modal .sub { margin: 0 0 16px; font-size: 12.5px; color: var(--ink-soft); }
+.modal input[type="password"] {
+  width: 100%; padding: 14px; font-size: 22px; letter-spacing: 0.3em; text-align: center;
+  border: 1px solid var(--rule); border-radius: 6px; margin-bottom: 10px; font-family: var(--font-display);
+}
+.modal-error { color: var(--danger); font-size: 12px; margin: -4px 0 10px; font-weight: 600; }
+.modal-actions { display: flex; gap: 10px; }
+.modal-actions button { flex: 1; padding: 12px; border-radius: 6px; font-size: 13px; font-weight: 700; }

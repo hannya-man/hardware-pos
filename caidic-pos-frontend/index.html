@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Caidic Hardware — POS</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+
+<!-- ===================== LOGIN ===================== -->
+<div id="loginScreen">
+  <div class="login-card">
+    <div class="hazard-edge"></div>
+    <div class="login-body">
+      <div class="login-brand">
+        <div class="name">Caidic Hardware</div>
+        <div class="sub">Tap your name, then enter your PIN</div>
+      </div>
+
+      <div id="staffGrid" class="staff-grid"></div>
+
+      <div id="pinPad" class="pin-pad-wrap" hidden>
+        <button type="button" class="pin-back" id="pinBack">&larr; Not you?</button>
+        <div class="pin-selected">
+          <span class="av" id="pinAv"></span>
+          <span class="nm" id="pinName"></span>
+        </div>
+        <div class="pin-dots"><span></span><span></span><span></span><span></span></div>
+        <div class="keypad" id="keypad"></div>
+        <div class="login-error" id="loginError"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ===================== APP SHELL ===================== -->
+<div id="appShell" hidden>
+  <aside class="sidebar">
+    <div class="brand">Caidic Hardware</div>
+    <nav class="nav-items" id="navItems"></nav>
+    <div class="sidebar-foot">
+      <div class="user-card">
+        <span class="av" id="sideAv"></span>
+        <div>
+          <div class="nm" id="sideName"></div>
+          <div class="rl" id="sideRole"></div>
+        </div>
+      </div>
+      <button id="logoutBtn" type="button">Log out</button>
+    </div>
+  </aside>
+
+  <div class="app-main">
+    <div class="hazard-edge"></div>
+    <header class="app-header">
+      <h1 id="viewTitle">POS Billing</h1>
+      <button id="statusPill" type="button"><span class="dot"></span><span id="statusLabel">Checking...</span></button>
+    </header>
+
+    <div class="view-body">
+
+      <!-- ---------- BILLING ---------- -->
+      <div id="viewBilling" class="view">
+        <div class="billing-grid">
+          <div style="display:flex; flex-direction:column; gap:18px;">
+            <div class="card">
+              <h2>Scan or search</h2>
+              <div class="search-box">
+                <input id="searchInput" type="text" placeholder="Scan a barcode, or type a name..." autocomplete="off">
+              </div>
+              <div id="searchResults"></div>
+              <h2>Items</h2>
+              <div id="grid" class="grid"></div>
+            </div>
+          </div>
+
+          <div class="card" id="ticketCard">
+            <div class="torn-edge"></div>
+            <div class="ticket-inner">
+              <div class="ticket-head"><span class="num">Current order</span></div>
+              <div id="lines"></div>
+              <div class="totals">
+                <div class="row"><span>Subtotal</span><span id="subtotal">&#8369;0.00</span></div>
+                <div class="row"><span>VAT (12%)</span><span id="vat">&#8369;0.00</span></div>
+                <div class="row grand"><span>Total</span><span id="grandTotal">&#8369;0.00</span></div>
+              </div>
+              <div class="ticket-actions">
+                <button id="chargeBtn" type="button" disabled>Charge (cash)</button>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- ---------- ACTIVITY LOG (owner only) ---------- -->
+      <div id="viewActivity" class="view" hidden>
+        <div class="card">
+          <h2>Filter</h2>
+          <div class="filter-row">
+            <select id="actEventType">
+              <option value="">All event types</option>
+              <option value="login">Login</option>
+              <option value="logout">Logout</option>
+              <option value="item_added">Item added</option>
+              <option value="barcode_scanned">Barcode scanned</option>
+              <option value="barcode_no_match">Barcode — no match</option>
+              <option value="order_cancelled">Order cancelled</option>
+              <option value="void_requested">Void requested</option>
+              <option value="no_sale_requested">No Sale requested</option>
+            </select>
+            <button type="button" id="actFilterBtn" class="btn-secondary">Apply</button>
+          </div>
+          <h2>Events</h2>
+          <table class="data-table" id="activityTable">
+            <thead><tr><th>Time</th><th>Staff</th><th>Event</th><th>Details</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---------- SHIFTS ---------- -->
+      <div id="viewShifts" class="view" hidden>
+        <div class="card" id="shiftsListCard">
+          <h2>All shifts</h2>
+          <table class="data-table" id="shiftsTable">
+            <thead><tr><th>Started</th><th>Cashier</th><th>Status</th><th>Opening cash</th><th>Sales total</th><th>Discrepancy</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card" id="shiftDetailCard" hidden>
+          <h2 id="shiftDetailTitle">Shift sales</h2>
+          <button type="button" class="btn-secondary" id="backToShifts">&larr; All shifts</button>
+          <table class="data-table" id="shiftSalesTable">
+            <thead><tr><th>Time</th><th>Total</th><th>Method</th><th>Status</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---------- RETURNS (owner only) ---------- -->
+      <div id="viewReturns" class="view" hidden>
+        <div class="card">
+          <h2>Process a return</h2>
+          <div class="form-row">
+            <label>Product</label>
+            <input id="retProductSearch" type="text" placeholder="Search by name or SKU...">
+            <div id="retProductResults"></div>
+            <input type="hidden" id="retProductId">
+          </div>
+          <div class="form-row"><label>Selected item</label><div id="retSelectedProduct" class="selected-chip">None selected</div></div>
+          <div class="form-row"><label>Quantity returned</label><input id="retQuantity" type="number" min="0.001" step="0.001" value="1"></div>
+          <div class="form-row">
+            <label>Condition</label>
+            <div class="radio-row">
+              <label><input type="radio" name="retCondition" value="good" checked> Good — restock</label>
+              <label><input type="radio" name="retCondition" value="damaged"> Damaged — lock</label>
+            </div>
+          </div>
+          <div class="form-row"><label>Reason (optional)</label><textarea id="retReason" rows="2"></textarea></div>
+          <button type="button" class="btn-primary" id="retSubmitBtn">Accept return</button>
+          <div id="retStatus" class="form-status"></div>
+        </div>
+      </div>
+
+      <!-- ---------- RECONCILIATION (owner only) ---------- -->
+      <div id="viewReconciliation" class="view" hidden>
+        <div class="card">
+          <h2>Today so far (system totals)</h2>
+          <div class="counter-row">
+            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">—</span></div>
+            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">—</span></div>
+          </div>
+          <h2>Physical count</h2>
+          <div class="form-row"><label>Physical items out (receipts/slips)</label><input id="recPhysicalOut" type="number" step="0.001"></div>
+          <div class="form-row"><label>Physical items in (deliveries/returns received)</label><input id="recPhysicalIn" type="number" step="0.001"></div>
+          <div class="form-row"><label>Notes (optional)</label><textarea id="recNotes" rows="2"></textarea></div>
+          <button type="button" class="btn-primary" id="recSubmitBtn">Submit reconciliation</button>
+          <div id="recStatus" class="form-status"></div>
+        </div>
+      </div>
+
+      <!-- ---------- ANALYTICS (owner only) ---------- -->
+      <div id="viewAnalytics" class="view" hidden>
+        <div class="card">
+          <h2>Top 10 fast movers (7 days)</h2>
+          <table class="data-table" id="fastMoversTable">
+            <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+          <h2>Bottom 5 slow movers</h2>
+          <table class="data-table" id="slowMoversTable">
+            <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---------- STAFF ---------- -->
+      <div id="viewStaff" class="view" hidden>
+        <div class="card">
+          <h2>Add staff</h2>
+          <div class="form-row-inline">
+            <input id="usrName" type="text" placeholder="Full name">
+            <select id="usrRole">
+              <option value="cashier">Cashier</option>
+              <option value="manager">Manager</option>
+              <option value="owner">Owner</option>
+            </select>
+            <input id="usrPin" type="text" inputmode="numeric" maxlength="4" placeholder="4-digit PIN">
+            <button type="button" class="btn-primary" id="usrAddBtn">Add</button>
+          </div>
+          <div id="usrStatus" class="form-status"></div>
+          <h2>Staff accounts</h2>
+          <table class="data-table" id="usersTable">
+            <thead><tr><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- PIN confirm modal — for owner-gated server actions -->
+<div id="pinConfirmOverlay" class="overlay" hidden>
+  <div class="modal">
+    <h3>Confirm your PIN</h3>
+    <p class="sub">This action needs to reach the server — enter your PIN again to continue.</p>
+    <input id="pinConfirmInput" type="password" inputmode="numeric" maxlength="4" placeholder="PIN">
+    <p id="pinConfirmError" class="modal-error" hidden></p>
+    <div class="modal-actions">
+      <button type="button" id="pinConfirmCancel" class="btn-secondary">Cancel</button>
+      <button type="button" id="pinConfirmSubmit" class="btn-primary">Confirm</button>
+    </div>
+  </div>
+</div>
+
+<script type="module" src="/src/main.js"></script>
+</body>
+</html>
