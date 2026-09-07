@@ -31,5 +31,17 @@ class AuthServiceProvider extends ServiceProvider
         // this gate exists; there's no route that checks it any differently
         // for them than a 404 would.
         Gate::define('view-activity-log', fn (User $user) => $user->isOwner());
+
+        // Dashboard summary cards — manager and owner, unlike the owner-only
+        // Fast/Slow Movers page it sits next to.
+        Gate::define('view-dashboard', fn (User $user) => $user->isManagerOrOwner());
+
+        // Stock browsing, receiving, and archive/restore + price edits —
+        // manager and owner. Never exposes cost_price.
+        Gate::define('manage-catalog', fn (User $user) => $user->isManagerOrOwner());
+
+        // Browsing sales/shifts and the Void screen's list — manager and
+        // owner. Actually voiding a sale still goes through approve-void.
+        Gate::define('view-sales', fn (User $user) => $user->isManagerOrOwner());
     }
 }

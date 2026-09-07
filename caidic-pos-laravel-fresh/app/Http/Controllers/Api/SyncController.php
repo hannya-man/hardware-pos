@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\ActivityLog;
 use App\Models\AuditLog;
+use App\Models\MaterialRequest;
 use App\Models\Sale;
 use App\Models\SaleItem;
 use App\Models\ShiftLog;
@@ -26,10 +27,13 @@ class SyncController extends Controller
     ];
 
     // Mergeable: written once, but CAN legitimately change later (a sale
-    // gets voided, a shift gets closed, a batch's qty_good_remaining drops).
+    // gets voided, a shift gets closed, a batch's qty_good_remaining drops,
+    // a material request gets marked fulfilled by a manager on a totally
+    // different device than the one that created it).
     private const MERGEABLE = [
         'sale_item' => SaleItem::class,
         'shift_log' => ShiftLog::class,
+        'material_request' => MaterialRequest::class,
     ];
 
     // Body: { items: [{ id, entity_type, entity_id, payload }, ...] }
@@ -167,6 +171,24 @@ class SyncController extends Controller
             $payload['received_at'] = now();
         }
 
-        StockBatch::updateOrCreate(['id' => $payload['id']], $payload);
+        $batch = StockBatch::updateOrCreate(['id' => $payload['id']], $payload);
+
+        // A batch alone doesn't move Reconciliation's "items in" counter —
+        // that's been watching for reason='stock_receipt' movements this
+        // whole time, and nothing ever created them for manual receiving.
+        // Guarded on reference_id+reason so a retried push of the same
+        // batch can't double-log the movement.
+        if (! StockMovement::where('reference_id', $batch->id)->where('reason', 'stock_receipt')->exists()) {
+            StockMovement::create([
+                'product_id' => $batch->product_id,
+                'batch_id' => $batch->id,
+                'terminal_id' => $payload['terminal_id'] ?? null,
+                'delta' => $batch->qty_good_remaining + $batch->qty_damaged,
+                'reason' => 'stock_receipt',
+                'reference_id' => $batch->id,
+                'actor_id' => $payload['created_by'] ?? null,
+                'client_created_at' => $payload['client_created_at'] ?? now(),
+            ]);
+        }
     }
 }
