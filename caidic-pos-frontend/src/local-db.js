@@ -38,6 +38,27 @@ db.version(2).stores({
   await tx.table('products').clear(); // v1 -> v2 shape changed enough that a fresh pullCatalog() is simpler than migrating field-by-field
 });
 
+// v3 — adds material_requests (Material Pick Lists). No shape change to
+// any existing table, so no upgrade() callback needed: Dexie just creates
+// the new, empty object store.
+db.version(3).stores({
+  products: 'id, sku, barcode, category_id, name, updated_at',
+  categories: 'id, name',
+  users: 'id, role',
+  stock_batches: 'id, product_id, location, received_at, qty_good_remaining, updated_at',
+
+  sales: 'id, shift_id, client_created_at, status',
+  sale_items: 'id, sale_id, product_id',
+  shift_logs: 'id, status, started_at',
+  audit_logs: 'id, actor_id, client_created_at',
+  activity_log: 'id, actor_id, shift_id, client_created_at',
+  stock_movements: 'id, product_id, batch_id, reference_id',
+  material_requests: 'id, requested_by, status, client_created_at',
+
+  outbox_queue: 'id, status, entity_type, created_at',
+  sync_meta: 'key'
+});
+
 export async function getTerminalId() {
   const existing = await db.sync_meta.get('terminal_id');
   if (existing) return existing.value;

@@ -282,7 +282,9 @@ input:focus-visible {
 /* ===========================================================================
    SIDEBAR NAV — role-filtered on the client for display only; every route
    behind these is enforced server-side by its own Gate regardless of what
-   this menu shows.
+   this menu shows. Groups (Inventory, Sales, Staff) collapse/expand;
+   their children reuse .nav-item with a quieter active treatment so they
+   don't compete with a top-level active item.
 =========================================================================== */
 .nav-items { flex: 1; padding: 14px 10px; display: flex; flex-direction: column; gap: 2px; }
 .nav-item {
@@ -290,10 +292,63 @@ input:focus-visible {
   background: none; border: none; color: #C6D0E0; font-size: 13px; font-weight: 500; text-align: left;
 }
 .nav-item:hover { background: var(--steel-line); color: #fff; }
-.nav-item.active { background: var(--safety-orange); color: #fff; }
+.nav-item.active {
+  background: var(--safety-orange); color: #fff;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 0 100%);
+}
+
+.nav-group { margin-bottom: 2px; }
+.nav-group-header {
+  width: 100%; display: flex; align-items: center; justify-content: space-between;
+  padding: 11px 12px; border-radius: 6px; background: none; border: none;
+  color: #C6D0E0; font-family: var(--font-display); font-size: 11px; font-weight: 700;
+  letter-spacing: 0.05em; text-transform: uppercase;
+}
+.nav-group-header:hover { background: var(--steel-line); color: #fff; }
+.nav-chevron { font-size: 9px; transition: transform 150ms ease; opacity: .7; }
+.nav-group.open .nav-chevron { transform: rotate(180deg); }
+
+.nav-group-children {
+  max-height: 0; overflow: hidden; transition: max-height 200ms ease;
+  display: flex; flex-direction: column; gap: 1px; padding-left: 10px;
+}
+.nav-group.open .nav-group-children { max-height: 240px; }
+
+.nav-item-child { padding: 9px 12px 9px 16px; font-size: 12.5px; border-left: 2px solid transparent; }
+.nav-item-child.active {
+  background: rgba(232, 93, 4, .16); color: #fff; border-left-color: var(--safety-orange);
+}
+.nav-item-child:hover:not(.active) { background: var(--steel-line); color: #fff; }
+
+.placeholder-note { color: var(--ink-soft); font-size: 13.5px; }
 
 /* ===========================================================================
-   DATA TABLES — used across Activity, Shifts, Analytics, Staff
+   DASHBOARD
+=========================================================================== */
+.dash-period {
+  display: inline-flex; gap: 2px; background: var(--surface-warm); border: 1px solid var(--rule);
+  border-radius: 999px; padding: 3px; margin-bottom: 16px;
+}
+.period-btn {
+  padding: 7px 16px; border: none; border-radius: 999px; background: none;
+  font-size: 12.5px; font-weight: 600; color: var(--ink-soft);
+}
+.period-btn.active { background: var(--steel); color: #fff; }
+.period-btn:hover:not(.active) { color: var(--ink); }
+
+.dash-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+.dash-wide { grid-column: span 3; }
+@media (max-width: 1000px) { .dash-grid { grid-template-columns: repeat(2, 1fr); } .dash-wide { grid-column: span 2; } }
+@media (max-width: 640px) { .dash-grid { grid-template-columns: 1fr; } .dash-wide { grid-column: span 1; } }
+
+.dash-card { display: flex; flex-direction: column; gap: 10px; }
+.dash-stat { display: flex; align-items: baseline; gap: 8px; }
+.dash-num { font-family: var(--font-display); font-size: 28px; font-weight: 700; color: var(--ink); }
+.dash-lbl { font-size: 12.5px; color: var(--ink-soft); }
+
+/* ===========================================================================
+   DATA TABLES — used across Activity, Shifts, Analytics, Staff, Stock,
+   Price List, Void
 =========================================================================== */
 .data-table { width: 100%; border-collapse: collapse; font-size: 13px; margin-top: 4px; }
 .data-table th {
@@ -306,9 +361,11 @@ input:focus-visible {
 .data-table tr.clickable-row { cursor: pointer; }
 .data-table .amt-cell { font-family: var(--font-display); font-weight: 700; }
 .data-table .empty-row td { text-align: center; color: var(--ink-soft); padding: 24px; }
+.row-archived { opacity: .5; }
+.sku-tag { font-family: var(--font-display); font-size: 10.5px; color: var(--ink-soft); }
 
 /* ===========================================================================
-   FORMS — Returns, Reconciliation, Staff
+   FORMS — Returns, Reconciliation, Staff, Stock, Price List
 =========================================================================== */
 .form-row { margin-bottom: 16px; }
 .form-row label { display: block; font-size: 12.5px; font-weight: 700; margin-bottom: 6px; color: var(--ink-soft); text-transform: uppercase; letter-spacing: 0.03em; }
@@ -347,7 +404,20 @@ input:focus-visible {
   color: var(--danger); font-weight: 700; font-size: 11.5px;
 }
 
-.filter-row { display: flex; gap: 10px; margin-bottom: 6px; }
+.filter-row { display: flex; gap: 10px; margin-bottom: 12px; align-items: center; }
+.filter-row input[type="text"] {
+  flex: 1; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 6px;
+  font-size: 13.5px; background: var(--surface-warm); color: var(--ink);
+}
+.filter-row .btn-primary, .filter-row .btn-secondary { margin-bottom: 0; }
+.archive-toggle { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--ink-soft); white-space: nowrap; }
+
+.price-edit { cursor: pointer; }
+.price-edit:hover { background: var(--safety-orange-soft); }
+.price-input {
+  width: 90px; padding: 5px 7px; border: 1.5px solid var(--safety-orange); border-radius: 4px;
+  font-family: var(--font-display); font-size: 13px; text-align: right;
+}
 
 .counter-row { display: flex; gap: 14px; margin-bottom: 8px; }
 .counter-box {
@@ -362,10 +432,12 @@ input:focus-visible {
 .variance-bad { color: var(--danger); font-weight: 700; }
 
 /* ===========================================================================
-   MODAL — the PIN-confirm overlay for owner-gated server actions
+   MODAL — the PIN-confirm overlay for owner-gated server actions, and the
+   Receive Stock overlay
 =========================================================================== */
 .overlay { position: fixed; inset: 0; background: rgba(32,29,26,.55); display: flex; align-items: center; justify-content: center; padding: 20px; z-index: 30; }
 .modal { background: var(--paper); border-radius: var(--radius); padding: 24px; width: 100%; max-width: 340px; }
+.modal-wide { max-width: 420px; }
 .modal h3 { margin: 0 0 6px; font-size: 15px; font-weight: 700; }
 .modal .sub { margin: 0 0 16px; font-size: 12.5px; color: var(--ink-soft); }
 .modal input[type="password"] {
@@ -375,3 +447,55 @@ input:focus-visible {
 .modal-error { color: var(--danger); font-size: 12px; margin: -4px 0 10px; font-weight: 600; }
 .modal-actions { display: flex; gap: 10px; }
 .modal-actions button { flex: 1; padding: 12px; border-radius: 6px; font-size: 13px; font-weight: 700; }
+
+/* ===========================================================================
+   ITEM PICKER ROWS — shared by Material Pick Lists and Supplier Orders.
+   Same visual language as the cart's .line remove button.
+=========================================================================== */
+.mr-item-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px dashed var(--rule); }
+.mr-item-name { flex: 1; font-size: 13px; }
+.mr-item-qty { width: 70px; padding: 6px 8px; border: 1px solid var(--rule); border-radius: 5px; font-family: var(--font-display); text-align: right; }
+.mr-item-row button {
+  border: none; background: var(--danger-soft); color: var(--danger);
+  border-radius: 50%; width: 22px; height: 22px; font-size: 11px; flex: none;
+}
+
+/* ===========================================================================
+   RECEIPT — built by receipt.js right after a sale, only ever visible via
+   @media print. Reuses the app's monospace "display" face so a printed
+   receipt still reads like it belongs to this app.
+=========================================================================== */
+#receiptPrintArea { display: none; }
+.receipt { font-family: var(--font-display); color: #000; }
+.receipt-header { text-align: center; margin-bottom: 10px; }
+.receipt-store { font-weight: 700; font-size: 14px; letter-spacing: 0.04em; text-transform: uppercase; }
+.receipt-meta { font-size: 10px; margin-top: 4px; line-height: 1.5; }
+.receipt-line { margin-bottom: 4px; }
+.receipt-line-name { font-size: 11px; }
+.receipt-line-detail { display: flex; justify-content: space-between; font-size: 10.5px; }
+.receipt-totals { margin-top: 8px; padding-top: 6px; border-top: 1px dashed #000; }
+.receipt-total-row { display: flex; justify-content: space-between; font-size: 11px; padding: 2px 0; }
+.receipt-total-row.receipt-grand { font-weight: 700; font-size: 13px; border-top: 1px dashed #000; margin-top: 4px; padding-top: 4px; }
+.receipt-footer { text-align: center; margin-top: 12px; font-size: 10px; }
+
+/* ===========================================================================
+   PRINT — two separate print modes. Plain printing (Price List's Print
+   button) hides chrome and keeps whatever's in .view-body. Receipt
+   printing (body.printing-receipt, set by receipt.js) hides literally
+   everything except #receiptPrintArea — no page-size override here on
+   purpose, since forcing an 80mm @page would also break Price List's
+   print. Most receipt-printer drivers report their own roll width to the
+   browser anyway; on a regular printer this just prints a narrow column.
+=========================================================================== */
+@media print {
+  .sidebar, .app-header, .filter-row, .placeholder-note { display: none !important; }
+  .view-body { padding: 0; }
+  .card { box-shadow: none; padding: 0; }
+
+  body.printing-receipt * { visibility: hidden; }
+  body.printing-receipt #receiptPrintArea,
+  body.printing-receipt #receiptPrintArea * { visibility: visible; }
+  body.printing-receipt #receiptPrintArea {
+    display: block; position: absolute; top: 0; left: 0; width: 80mm; padding: 4mm;
+  }
+}

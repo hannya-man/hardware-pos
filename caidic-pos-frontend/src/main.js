@@ -6,9 +6,12 @@ import { db, getTerminalId, isProvisioned, setTerminalKey, getOpenShift } from '
 import { verifyStaffLogin, searchProducts, quickSelect, attachScannerListener, getProductByBarcode } from './input-handler.js';
 import { startSyncWorker, pullCatalog, completeSale, openShift, logActivity } from './sync-worker.js';
 import {
-  setAdminUser, renderActivity, renderShifts, renderReturns,
-  renderReconciliation, renderAnalytics, renderStaff
+  setAdminUser, renderActivity, renderShifts, renderVoid, renderReturns,
+  renderReconciliation, renderAnalytics, renderStaff, renderArchives
 } from './admin.js';
+import { renderDashboard } from './dashboard.js';
+import { renderStock, renderPriceList, renderMaterialRequests, renderPurchaseOrders, setInventoryUser } from './inventory.js';
+import { printReceipt } from './receipt.js';
 
 const $ = (id) => document.getElementById(id);
 const peso = (n) => '\u20b1' + Number(n).toFixed(2);
@@ -50,14 +53,46 @@ function showPrompt(message, defaultValue = '') {
 // screen behind these is still enforced server-side by its own Gate; a
 // cashier who forced their way to, say, #viewStaff would just get 401s
 // back from every call admin.js makes.
+//
+// Grouped items (inventory, sales, staffGroup) render as a collapsible
+// section in the sidebar; their `children` are the actual clickable
+// leaves. Only leaves have onEnter / a matching view div — groups are
+// just a visual container and are never passed to switchView().
 const NAV_ITEMS = [
-  { key: 'billing', label: 'POS Billing', roles: ['cashier', 'manager', 'owner'], onEnter: () => renderGrid() },
-  { key: 'shifts', label: 'Shifts', roles: ['manager', 'owner'], onEnter: renderShifts },
-  { key: 'returns', label: 'Returns', roles: ['owner'], onEnter: renderReturns },
-  { key: 'reconciliation', label: 'Reconciliation', roles: ['owner'], onEnter: renderReconciliation },
-  { key: 'analytics', label: 'Fast/Slow Movers', roles: ['owner'], onEnter: renderAnalytics },
-  { key: 'activity', label: 'Activity Log', roles: ['owner'], onEnter: renderActivity },
-  { key: 'staff', label: 'Staff', roles: ['manager', 'owner'], onEnter: renderStaff }
+  { key: 'dashboard', label: 'Dashboard', roles: ['manager', 'owner'], onEnter: renderDashboard },
+  {
+    key: 'posTerminal', label: 'POS Terminal', roles: ['cashier', 'manager', 'owner'],
+    children: [
+      { key: 'billing', label: 'Billing & Checkout', roles: ['cashier', 'manager', 'owner'], onEnter: () => renderGrid() },
+      { key: 'materialRequests', label: 'Material Pick Lists', roles: ['cashier', 'manager', 'owner'], onEnter: renderMaterialRequests },
+    ],
+  },
+  {
+    key: 'inventory', label: 'Inventory', roles: ['manager', 'owner'],
+    children: [
+      { key: 'stock', label: 'Stock List', roles: ['manager', 'owner'], onEnter: renderStock },
+      { key: 'reconciliation', label: 'Stock Audits', roles: ['owner'], onEnter: renderReconciliation },
+      { key: 'purchaseOrders', label: 'Supplier Orders', roles: ['manager', 'owner'], onEnter: renderPurchaseOrders },
+      { key: 'priceList', label: 'Price List', roles: ['manager', 'owner'], onEnter: renderPriceList },
+    ],
+  },
+  {
+    key: 'sales', label: 'Sales', roles: ['manager', 'owner'],
+    children: [
+      { key: 'salesOrders', label: 'Order History', roles: ['manager', 'owner'], onEnter: renderShifts },
+      { key: 'analytics', label: 'Fast & Slow Items', roles: ['owner'], onEnter: renderAnalytics },
+      { key: 'returns', label: 'Tool Returns', roles: ['owner'], onEnter: renderReturns },
+      { key: 'void', label: 'Cancelled Sales', roles: ['manager', 'owner'], onEnter: renderVoid },
+    ],
+  },
+  {
+    key: 'staffGroup', label: 'Security & Logs', roles: ['manager', 'owner'],
+    children: [
+      { key: 'activity', label: 'Staff Logs', roles: ['owner'], onEnter: renderActivity },
+      { key: 'staff', label: 'User Roles & Access', roles: ['manager', 'owner'], onEnter: renderStaff },
+    ],
+  },
+  { key: 'archives', label: 'Archives', roles: ['manager', 'owner'], onEnter: renderArchives },
 ];
 
 let currentUser = null;
@@ -66,6 +101,7 @@ let cart = [];
 let selectedLoginUser = null;
 let pinDraft = '';
 let activeView = 'billing';
+let expandedGroups = new Set();
 
 // ---------------------------------------------------------------------------
 // STARTUP
@@ -171,6 +207,7 @@ async function enterApp() {
   $('sideRole').textContent = currentUser.role;
   $('sideAv').textContent = initials(currentUser.full_name);
   setAdminUser(currentUser);
+  setInventoryUser(currentUser);
 
   const terminal_id = await getTerminalId();
   const openShiftRow = await getOpenShift(terminal_id);
@@ -191,24 +228,67 @@ async function enterApp() {
   renderCart();
 }
 
+function flattenLeaves(items) {
+  return items.flatMap((item) => (item.children ? flattenLeaves(item.children) : [item]));
+}
+
+function findLeaf(key) {
+  return flattenLeaves(NAV_ITEMS).find((item) => item.key === key);
+}
+
+function findParentGroup(key) {
+  return NAV_ITEMS.find((item) => item.children?.some((c) => c.key === key));
+}
+
 function renderNav() {
-  const items = NAV_ITEMS.filter((n) => n.roles.includes(currentUser.role));
-  $('navItems').innerHTML = items.map((n) => `
-    <button type="button" class="nav-item${n.key === activeView ? ' active' : ''}" data-view="${n.key}">${n.label}</button>
-  `).join('');
-  $('navItems').querySelectorAll('.nav-item').forEach((btn) => {
+  $('navItems').innerHTML = NAV_ITEMS
+    .filter((item) => item.roles.includes(currentUser.role))
+    .map((item) => {
+      if (!item.children) {
+        return `<button type="button" class="nav-item${item.key === activeView ? ' active' : ''}" data-view="${item.key}">${item.label}</button>`;
+      }
+      const visibleChildren = item.children.filter((c) => c.roles.includes(currentUser.role));
+      if (!visibleChildren.length) return '';
+      const isOpen = expandedGroups.has(item.key);
+      return `
+        <div class="nav-group${isOpen ? ' open' : ''}" data-group-key="${item.key}">
+          <button type="button" class="nav-group-header" data-group="${item.key}">
+            <span>${item.label}</span>
+            <span class="nav-chevron">&#9662;</span>
+          </button>
+          <div class="nav-group-children">
+            ${visibleChildren.map((c) => `
+              <button type="button" class="nav-item nav-item-child${c.key === activeView ? ' active' : ''}" data-view="${c.key}">${c.label}</button>
+            `).join('')}
+          </div>
+        </div>`;
+    }).join('');
+
+  $('navItems').querySelectorAll('[data-view]').forEach((btn) => {
     btn.addEventListener('click', () => switchView(btn.dataset.view));
   });
+  $('navItems').querySelectorAll('[data-group]').forEach((btn) => {
+    btn.addEventListener('click', () => toggleGroup(btn.dataset.group));
+  });
+}
+
+function toggleGroup(key) {
+  const groupEl = document.querySelector(`.nav-group[data-group-key="${key}"]`);
+  if (!groupEl) return;
+  const isOpen = groupEl.classList.toggle('open');
+  if (isOpen) expandedGroups.add(key); else expandedGroups.delete(key);
 }
 
 function switchView(view) {
   activeView = view;
-  document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== `view${capitalize(view)}`; });
-  $('viewTitle').textContent = NAV_ITEMS.find((n) => n.key === view)?.label ?? view;
-  renderNav();
+  const parent = findParentGroup(view);
+  if (parent) expandedGroups.add(parent.key);
 
-  const entry = NAV_ITEMS.find((n) => n.key === view);
-  entry?.onEnter();
+  document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== `view${capitalize(view)}`; });
+  const entry = findLeaf(view);
+  $('viewTitle').textContent = entry?.label ?? view;
+  renderNav();
+  entry?.onEnter?.();
 }
 
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -218,6 +298,7 @@ $('logoutBtn').addEventListener('click', async () => {
   currentUser = null;
   cart = [];
   activeView = 'billing';
+  expandedGroups.clear();
   $('appShell').hidden = true;
   $('loginScreen').hidden = false;
   $('staffGrid').hidden = false;
@@ -329,6 +410,7 @@ $('chargeBtn').addEventListener('click', async () => {
   const subtotal = round2(cart.reduce((sum, l) => sum + l.line_total, 0));
   const tax_amount = round2(subtotal * 0.12);
   const total_amount = round2(subtotal + tax_amount);
+  const soldItems = [...cart];
 
   const sale_id = await completeSale({
     cashier_id: currentUser.id,
@@ -339,7 +421,14 @@ $('chargeBtn').addEventListener('click', async () => {
     tax_amount
   });
 
-  window.alert(`Sale complete \u2014 #${sale_id.slice(0, 8)}`);
+  printReceipt({
+    saleId: sale_id,
+    cashierName: currentUser.full_name,
+    cart: soldItems,
+    subtotal, taxAmount: tax_amount, totalAmount: total_amount,
+    paymentMethod: 'cash', amountTendered: total_amount, changeAmount: 0
+  });
+
   cart = [];
   renderCart();
 });

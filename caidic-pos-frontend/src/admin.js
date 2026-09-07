@@ -12,12 +12,13 @@ import {
   fetchActivityLog, fetchShifts, fetchSales, voidSaleAsAdmin,
   submitReturn, fetchTodayReconciliation, submitReconciliation,
   fetchMovers, submitCycleCount,
-  fetchUsers, createUser, updateUser
+  fetchUsers, createUser, updateUser,
+  fetchStock, updateProduct
 } from './sync-worker.js';
 
 const $ = (id) => document.getElementById(id);
 const peso = (n) => '\u20b1' + Number(n).toFixed(2);
-const fmtTime = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+export const fmtTime = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 
 let adminUser = null;
 export function setAdminUser(user) { adminUser = user; }
@@ -28,6 +29,8 @@ export function setAdminUser(user) { adminUser = user; }
 // for a fresh token via loginWithPin(), then retries the original call
 // exactly once. This is the one place a "confirm your PIN" popup should
 // ever appear for these screens — callers below never handle auth directly.
+// Exported so dashboard.js and inventory.js can reuse it instead of each
+// building their own PIN-retry modal.
 // ---------------------------------------------------------------------------
 
 function promptForServerPin() {
@@ -76,7 +79,7 @@ function promptForServerPin() {
   });
 }
 
-async function withServerAuth(fn) {
+export async function withServerAuth(fn) {
   try {
     return await fn();
   } catch (err) {
@@ -187,6 +190,52 @@ async function renderShiftDetail(shiftId, shiftRow) {
 }
 
 $('backToShifts').addEventListener('click', renderShifts);
+
+// ---------------------------------------------------------------------------
+// VOID — a focused list of completed sales, separate from browsing shift
+// by shift. Same voidSaleAsAdmin() call the Shift detail view already
+// used; this just surfaces it as its own screen per the new sidebar.
+// manager+owner.
+// ---------------------------------------------------------------------------
+
+export async function renderVoid() {
+  await loadVoidableSales();
+}
+
+async function loadVoidableSales() {
+  const tbody = $('voidTable').querySelector('tbody');
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Loading...</td></tr>';
+  try {
+    const result = await withServerAuth(() => fetchSales({ status: 'completed' }));
+    const sales = result.data ?? result;
+    drawVoidTable(sales);
+  } catch (err) {
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load — ${err.message}</td></tr>`;
+  }
+}
+
+function drawVoidTable(sales) {
+  const tbody = $('voidTable').querySelector('tbody');
+  tbody.innerHTML = sales.length
+    ? sales.map((s) => `
+        <tr>
+          <td>${fmtTime(s.client_created_at)}</td>
+          <td>${s.cashier?.full_name ?? '\u2014'}</td>
+          <td class="amt-cell">${peso(s.total_amount)}</td>
+          <td>${s.payment_method}</td>
+          <td><button type="button" class="btn-void" data-void="${s.id}">Void</button></td>
+        </tr>`).join('')
+    : '<tr class="empty-row"><td colspan="5">Nothing to void right now.</td></tr>';
+
+  tbody.querySelectorAll('[data-void]').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      const reason = window.prompt('Reason for voiding this sale:');
+      if (!reason) return;
+      await withServerAuth(() => voidSaleAsAdmin(btn.dataset.void, reason));
+      loadVoidableSales();
+    });
+  });
+}
 
 // ---------------------------------------------------------------------------
 // RETURNS — owner only.
@@ -410,3 +459,62 @@ $('usrAddBtn').addEventListener('click', async () => {
     status.className = 'form-status err';
   }
 });
+
+// ---------------------------------------------------------------------------
+// ARCHIVES — a read-only view of what's already archived across Products
+// and Staff. No purge, here or anywhere in this app — archived just means
+// hidden from the main list and fully restorable, same as it's always
+// worked. Reuses fetchStock/updateProduct and fetchUsers/updateUser; no
+// new backend calls needed for this screen.
+// ---------------------------------------------------------------------------
+
+export async function renderArchives() {
+  const itemsBody = $('archivedItemsTable').querySelector('tbody');
+  const staffBody = $('archivedStaffTable').querySelector('tbody');
+  itemsBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
+  staffBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
+
+  try {
+    const allStock = await withServerAuth(() => fetchStock(true));
+    const archivedItems = allStock.filter((r) => !r.is_active);
+    itemsBody.innerHTML = archivedItems.length
+      ? archivedItems.map((r) => `
+          <tr>
+            <td>${r.name}</td>
+            <td class="sku-tag">${r.sku}</td>
+            <td><button type="button" class="btn-secondary" data-restore-item="${r.id}">Restore</button></td>
+          </tr>`).join('')
+      : '<tr class="empty-row"><td colspan="3">Nothing archived.</td></tr>';
+
+    itemsBody.querySelectorAll('[data-restore-item]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await withServerAuth(() => updateProduct(btn.dataset.restoreItem, { is_active: true }));
+        renderArchives();
+      });
+    });
+  } catch (err) {
+    itemsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load — ${err.message}</td></tr>`;
+  }
+
+  try {
+    const allStaff = await withServerAuth(() => fetchUsers());
+    const archivedStaff = allStaff.filter((u) => !u.is_active);
+    staffBody.innerHTML = archivedStaff.length
+      ? archivedStaff.map((u) => `
+          <tr>
+            <td>${u.full_name}</td>
+            <td>${u.role}</td>
+            <td><button type="button" class="btn-secondary" data-restore-staff="${u.id}">Restore</button></td>
+          </tr>`).join('')
+      : '<tr class="empty-row"><td colspan="3">Nothing archived.</td></tr>';
+
+    staffBody.querySelectorAll('[data-restore-staff]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        await withServerAuth(() => updateUser(btn.dataset.restoreStaff, { is_active: true }));
+        renderArchives();
+      });
+    });
+  } catch (err) {
+    staffBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load — ${err.message}</td></tr>`;
+  }
+}

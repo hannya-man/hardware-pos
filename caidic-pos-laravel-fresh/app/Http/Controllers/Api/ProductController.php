@@ -18,4 +18,24 @@ class ProductController extends Controller
 
         return response()->json(Product::findOrFail($id));
     }
+
+    // PATCH /api/products/{id} — manager+owner, not owner-only like show().
+    // Deliberately narrow: unit_price and is_active (archive/restore) only.
+    // cost_price editing isn't built yet and shouldn't ride in on a
+    // manager-accessible endpoint once it eventually is.
+    public function update(Request $request, string $id)
+    {
+        Gate::authorize('manage-catalog');
+
+        $product = Product::findOrFail($id);
+
+        $data = $request->validate([
+            'unit_price' => ['sometimes', 'numeric', 'min:0'],
+            'is_active' => ['sometimes', 'boolean'],
+        ]);
+
+        $product->update($data);
+
+        return response()->json($product->only(['id', 'sku', 'name', 'unit_price', 'is_active']));
+    }
 }

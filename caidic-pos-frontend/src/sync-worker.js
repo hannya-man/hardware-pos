@@ -158,6 +158,28 @@ export async function receiveStock({ product_id, location, quantity, damaged_qua
   return batch_id;
 }
 
+// Material Pick Lists — same local-write-then-enqueue pattern as
+// completeSale()/receiveStock(). Any logged-in staff member can submit
+// one; it's a routine terminal action, not an owner-gated one, so it
+// syncs with the terminal key like everything else in this section.
+export async function submitMaterialRequest({ requested_by, items, notes = null }) {
+  const request_id = crypto.randomUUID();
+  const terminal_id = await getTerminalId();
+  const client_created_at = new Date().toISOString();
+
+  const request = {
+    id: request_id, terminal_id, requested_by, items, notes,
+    status: 'pending', client_created_at
+  };
+
+  await db.transaction('rw', db.material_requests, db.outbox_queue, async () => {
+    await db.material_requests.add(request);
+    await enqueue('material_request', request_id, request);
+  });
+
+  return request_id;
+}
+
 export async function logFailedPinAttempt({ actor_id = null, context = {} }) {
   const terminal_id = await getTerminalId();
   const audit = {
@@ -251,6 +273,51 @@ export async function submitReconciliation(payload) {
 
 export async function fetchMovers(days = 7) {
   return api(`/analytics/movers?days=${days}`, { mode: 'user' });
+}
+
+export async function fetchDashboard(period = 'today') {
+  return api(`/dashboard?period=${period}`, { mode: 'user' });
+}
+
+export async function fetchStock(includeArchived = false) {
+  return api(`/inventory/stock?include_archived=${includeArchived ? 1 : 0}`, { mode: 'user' });
+}
+
+export async function updateProduct(id, payload) {
+  return api(`/products/${id}`, { method: 'PATCH', body: payload, mode: 'user' });
+}
+
+// Material Pick Lists — viewing/fulfilling only. Creation is
+// submitMaterialRequest() above, which never touches this mode:'user' path.
+export async function fetchMaterialRequests(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return api(`/material-requests${qs ? `?${qs}` : ''}`, { mode: 'user' });
+}
+
+export async function fulfillMaterialRequest(id) {
+  return api(`/material-requests/${id}/fulfill`, { method: 'PATCH', mode: 'user' });
+}
+
+// Supplier Orders
+export async function fetchSuppliers() {
+  return api('/suppliers', { mode: 'user' });
+}
+
+export async function createSupplier(payload) {
+  return api('/suppliers', { method: 'POST', body: payload, mode: 'user' });
+}
+
+export async function fetchPurchaseOrders(params = {}) {
+  const qs = new URLSearchParams(params).toString();
+  return api(`/purchase-orders${qs ? `?${qs}` : ''}`, { mode: 'user' });
+}
+
+export async function createPurchaseOrder(payload) {
+  return api('/purchase-orders', { method: 'POST', body: payload, mode: 'user' });
+}
+
+export async function receivePurchaseOrder(id) {
+  return api(`/purchase-orders/${id}/receive`, { method: 'PATCH', mode: 'user' });
 }
 
 export async function submitCycleCount(payload) {

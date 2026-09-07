@@ -60,6 +60,63 @@
 
     <div class="view-body">
 
+      <!-- ---------- DASHBOARD (manager+owner) ---------- -->
+      <div id="viewDashboard" class="view" hidden>
+        <div class="dash-period" id="dashPeriod">
+          <button type="button" class="period-btn active" data-period="today">Today</button>
+          <button type="button" class="period-btn" data-period="week">This Week</button>
+          <button type="button" class="period-btn" data-period="month">This Month</button>
+          <button type="button" class="period-btn" data-period="year">This Year</button>
+        </div>
+
+        <div class="dash-grid">
+          <div class="card dash-card">
+            <h2>Sales Activity</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashRevenue">&mdash;</span><span class="dash-lbl">revenue</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Sales Orders</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashOrderCount">&mdash;</span><span class="dash-lbl">orders this period</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Active Items</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashActiveSkus">&mdash;</span><span class="dash-lbl">active SKUs</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Inventory Summary</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashGoodUnits">&mdash;</span><span class="dash-lbl">units on hand</span></div>
+            <div class="dash-stat"><span class="dash-num" id="dashRetailValue">&mdash;</span><span class="dash-lbl">retail value</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Purchase Orders</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashPendingPOs">&mdash;</span><span class="dash-lbl">pending</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Stock Alerts</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashLowStockCount">&mdash;</span><span class="dash-lbl">items at or below reorder level</span></div>
+          </div>
+
+          <div class="card dash-card">
+            <h2>Register Status</h2>
+            <div class="dash-stat"><span class="dash-num" id="dashRegisterStatus">&mdash;</span></div>
+            <span class="dash-lbl" id="dashRegisterDetail"></span>
+          </div>
+
+          <div class="card dash-card dash-wide">
+            <h2>Top Selling Items</h2>
+            <table class="data-table" id="dashTopSelling">
+              <thead><tr><th>Product</th><th>Units sold</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
       <!-- ---------- BILLING ---------- -->
       <div id="viewBilling" class="view">
         <div class="billing-grid">
@@ -93,46 +150,88 @@
         </div>
       </div>
 
-      <!-- ---------- ACTIVITY LOG (owner only) ---------- -->
-      <div id="viewActivity" class="view" hidden>
+      <!-- ---------- MATERIAL PICK LISTS (all roles — create is open to
+           everyone; the review/fulfill table below only shows for
+           manager/owner, toggled in inventory.js) ---------- -->
+      <div id="viewMaterialRequests" class="view" hidden>
         <div class="card">
-          <h2>Filter</h2>
-          <div class="filter-row">
-            <select id="actEventType">
-              <option value="">All event types</option>
-              <option value="login">Login</option>
-              <option value="logout">Logout</option>
-              <option value="item_added">Item added</option>
-              <option value="barcode_scanned">Barcode scanned</option>
-              <option value="barcode_no_match">Barcode — no match</option>
-              <option value="order_cancelled">Order cancelled</option>
-              <option value="void_requested">Void requested</option>
-              <option value="no_sale_requested">No Sale requested</option>
-            </select>
-            <button type="button" id="actFilterBtn" class="btn-secondary">Apply</button>
+          <h2>New pick list</h2>
+          <div class="form-row">
+            <label>Item</label>
+            <input id="mrProductSearch" type="text" placeholder="Search by name or SKU...">
+            <div id="mrProductResults"></div>
           </div>
-          <h2>Events</h2>
-          <table class="data-table" id="activityTable">
-            <thead><tr><th>Time</th><th>Staff</th><th>Event</th><th>Details</th></tr></thead>
+          <div id="mrItemsList"></div>
+          <div class="form-row"><label>Note (optional)</label><textarea id="mrNotes" rows="2" placeholder="e.g. customer job, or running low"></textarea></div>
+          <p id="mrStatus" class="form-status"></p>
+          <button type="button" class="btn-primary" id="mrSubmitBtn">Send to inventory</button>
+        </div>
+
+        <div class="card" id="mrListCard" hidden>
+          <div class="filter-row">
+            <h2 style="margin:0;">Submitted lists</h2>
+            <label class="archive-toggle"><input type="checkbox" id="mrShowAll"> Show fulfilled too</label>
+          </div>
+          <table class="data-table" id="materialRequestsTable">
+            <thead><tr><th>Time</th><th>Requested by</th><th>Items</th><th>Note</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+      <div id="viewStock" class="view" hidden>
+        <div class="card">
+          <div class="filter-row">
+            <input id="stockSearch" type="text" placeholder="Search by name or SKU...">
+            <label class="archive-toggle"><input type="checkbox" id="stockArchivedToggle"> Show archived</label>
+            <button type="button" class="btn-primary" id="receiveOpenBtn">+ Receive Stock</button>
+          </div>
+          <table class="data-table" id="stockTable">
+            <thead><tr><th>Item</th><th>Store</th><th>Warehouse</th><th>Damaged</th><th>Level</th><th>Status</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
       </div>
 
-      <!-- ---------- SHIFTS ---------- -->
-      <div id="viewShifts" class="view" hidden>
-        <div class="card" id="shiftsListCard">
-          <h2>All shifts</h2>
-          <table class="data-table" id="shiftsTable">
-            <thead><tr><th>Started</th><th>Cashier</th><th>Status</th><th>Opening cash</th><th>Sales total</th><th>Discrepancy</th></tr></thead>
+      <!-- ---------- RECONCILIATION (owner only) ---------- -->
+      <div id="viewReconciliation" class="view" hidden>
+        <div class="card">
+          <h2>Today so far (system totals)</h2>
+          <div class="counter-row">
+            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">—</span></div>
+            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">—</span></div>
+          </div>
+          <h2>Physical count</h2>
+          <div class="form-row"><label>Physical items out (receipts/slips)</label><input id="recPhysicalOut" type="number" step="0.001"></div>
+          <div class="form-row"><label>Physical items in (deliveries/returns received)</label><input id="recPhysicalIn" type="number" step="0.001"></div>
+          <div class="form-row"><label>Notes (optional)</label><textarea id="recNotes" rows="2"></textarea></div>
+          <button type="button" class="btn-primary" id="recSubmitBtn">Submit reconciliation</button>
+          <div id="recStatus" class="form-status"></div>
+        </div>
+      </div>
+
+      <!-- ---------- SUPPLIER ORDERS (manager+owner) ---------- -->
+      <div id="viewPurchaseOrders" class="view" hidden>
+        <div class="card">
+          <div class="filter-row">
+            <button type="button" class="btn-primary" id="poOpenCreateBtn">+ New Purchase Order</button>
+          </div>
+          <table class="data-table" id="purchaseOrdersTable">
+            <thead><tr><th>PO #</th><th>Supplier</th><th>Items</th><th>Status</th><th>Expected</th><th></th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
-        <div class="card" id="shiftDetailCard" hidden>
-          <h2 id="shiftDetailTitle">Shift sales</h2>
-          <button type="button" class="btn-secondary" id="backToShifts">&larr; All shifts</button>
-          <table class="data-table" id="shiftSalesTable">
-            <thead><tr><th>Time</th><th>Total</th><th>Method</th><th>Status</th><th></th></tr></thead>
+      </div>
+
+      <!-- ---------- PRICE LIST (manager+owner) ---------- -->
+      <div id="viewPriceList" class="view" hidden>
+        <div class="card">
+          <div class="filter-row">
+            <input id="priceListSearch" type="text" placeholder="Search by name or SKU...">
+            <button type="button" class="btn-secondary" id="priceListPrintBtn">Print</button>
+          </div>
+          <p class="placeholder-note">Click a price to edit it.</p>
+          <table class="data-table" id="priceListTable">
+            <thead><tr><th>Item</th><th>Unit</th><th>Price</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -163,24 +262,18 @@
         </div>
       </div>
 
-      <!-- ---------- RECONCILIATION (owner only) ---------- -->
-      <div id="viewReconciliation" class="view" hidden>
+      <!-- ---------- VOID (manager+owner) ---------- -->
+      <div id="viewVoid" class="view" hidden>
         <div class="card">
-          <h2>Today so far (system totals)</h2>
-          <div class="counter-row">
-            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">—</span></div>
-            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">—</span></div>
-          </div>
-          <h2>Physical count</h2>
-          <div class="form-row"><label>Physical items out (receipts/slips)</label><input id="recPhysicalOut" type="number" step="0.001"></div>
-          <div class="form-row"><label>Physical items in (deliveries/returns received)</label><input id="recPhysicalIn" type="number" step="0.001"></div>
-          <div class="form-row"><label>Notes (optional)</label><textarea id="recNotes" rows="2"></textarea></div>
-          <button type="button" class="btn-primary" id="recSubmitBtn">Submit reconciliation</button>
-          <div id="recStatus" class="form-status"></div>
+          <h2>Voidable Sales</h2>
+          <table class="data-table" id="voidTable">
+            <thead><tr><th>Time</th><th>Cashier</th><th>Total</th><th>Method</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
         </div>
       </div>
 
-      <!-- ---------- ANALYTICS (owner only) ---------- -->
+      <!-- ---------- ANALYTICS / FAST-SLOW MOVERS (owner only) ---------- -->
       <div id="viewAnalytics" class="view" hidden>
         <div class="card">
           <h2>Top 10 fast movers (7 days)</h2>
@@ -191,6 +284,54 @@
           <h2>Bottom 5 slow movers</h2>
           <table class="data-table" id="slowMoversTable">
             <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---------- SALES & ORDERS (manager+owner) — the original Shifts
+           screen, relocated here. Same ids (shiftsTable, backToShifts,
+           etc.), same renderShifts()/renderShiftDetail() in admin.js —
+           only the view id and where it lives in the nav changed. ---------- -->
+      <div id="viewSalesOrders" class="view" hidden>
+        <div class="card" id="shiftsListCard">
+          <h2>All shifts</h2>
+          <table class="data-table" id="shiftsTable">
+            <thead><tr><th>Started</th><th>Cashier</th><th>Status</th><th>Opening cash</th><th>Sales total</th><th>Discrepancy</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card" id="shiftDetailCard" hidden>
+          <h2 id="shiftDetailTitle">Shift sales</h2>
+          <button type="button" class="btn-secondary" id="backToShifts">&larr; All shifts</button>
+          <table class="data-table" id="shiftSalesTable">
+            <thead><tr><th>Time</th><th>Total</th><th>Method</th><th>Status</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
+      <!-- ---------- ACTIVITY LOG (owner only) ---------- -->
+      <div id="viewActivity" class="view" hidden>
+        <div class="card">
+          <h2>Filter</h2>
+          <div class="filter-row">
+            <select id="actEventType">
+              <option value="">All event types</option>
+              <option value="login">Login</option>
+              <option value="logout">Logout</option>
+              <option value="item_added">Item added</option>
+              <option value="barcode_scanned">Barcode scanned</option>
+              <option value="barcode_no_match">Barcode — no match</option>
+              <option value="order_cancelled">Order cancelled</option>
+              <option value="void_requested">Void requested</option>
+              <option value="no_sale_requested">No Sale requested</option>
+            </select>
+            <button type="button" id="actFilterBtn" class="btn-secondary">Apply</button>
+          </div>
+          <h2>Events</h2>
+          <table class="data-table" id="activityTable">
+            <thead><tr><th>Time</th><th>Staff</th><th>Event</th><th>Details</th></tr></thead>
             <tbody></tbody>
           </table>
         </div>
@@ -219,6 +360,25 @@
         </div>
       </div>
 
+      <!-- ---------- ARCHIVES (manager+owner) — read-only view of what's
+           already archived. No purge, here or anywhere in this app. ---------- -->
+      <div id="viewArchives" class="view" hidden>
+        <div class="card">
+          <h2>Archived Items</h2>
+          <table class="data-table" id="archivedItemsTable">
+            <thead><tr><th>Item</th><th>SKU</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <div class="card">
+          <h2>Deactivated Staff</h2>
+          <table class="data-table" id="archivedStaffTable">
+            <thead><tr><th>Name</th><th>Role</th><th></th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>
@@ -234,6 +394,75 @@
       <button type="button" id="pinConfirmCancel" class="btn-secondary">Cancel</button>
       <button type="button" id="pinConfirmSubmit" class="btn-primary">Confirm</button>
     </div>
+  </div>
+</div>
+
+<!-- Receive Stock modal — used from the Stock screen -->
+<div id="receiveOverlay" class="overlay" hidden>
+  <div class="modal modal-wide">
+    <h3>Receive Stock</h3>
+    <div class="form-row">
+      <label>Item</label>
+      <input id="receiveProductSearch" type="text" placeholder="Search by name or SKU...">
+      <div id="receiveProductResults"></div>
+      <div class="selected-chip" id="receiveSelected">None selected</div>
+    </div>
+    <div class="form-row">
+      <label>Location</label>
+      <select id="receiveLocation"><option value="store">Store</option><option value="warehouse">Warehouse</option></select>
+    </div>
+    <div class="form-row"><label>Quantity received</label><input id="receiveQty" type="number" min="0.001" step="0.001"></div>
+    <div class="form-row"><label>Of which damaged (optional)</label><input id="receiveDamagedQty" type="number" min="0" step="0.001" value="0"></div>
+    <p id="receiveStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" id="receiveCancelBtn" class="btn-secondary">Cancel</button>
+      <button type="button" id="receiveSubmitBtn" class="btn-primary">Receive</button>
+    </div>
+  </div>
+</div>
+
+<!-- New Purchase Order modal — used from Supplier Orders -->
+<div id="poCreateOverlay" class="overlay" hidden>
+  <div class="modal modal-wide">
+    <h3>New Purchase Order</h3>
+    <div class="form-row">
+      <label>Supplier</label>
+      <select id="poSupplierSelect"><option value="">Select a supplier...</option></select>
+      <button type="button" class="btn-secondary" id="poNewSupplierToggle" style="margin-top:8px;">+ New supplier</button>
+      <div id="poNewSupplierFields" hidden style="margin-top:10px;">
+        <input id="poNewSupplierName" type="text" placeholder="Supplier name">
+        <input id="poNewSupplierPhone" type="text" placeholder="Phone (optional)" style="margin-top:8px;">
+        <button type="button" class="btn-primary" id="poNewSupplierSave" style="margin-top:8px;">Save supplier</button>
+      </div>
+    </div>
+    <div class="form-row">
+      <label>Items</label>
+      <input id="poProductSearch" type="text" placeholder="Search by name or SKU...">
+      <div id="poProductResults"></div>
+    </div>
+    <div id="poItemsList"></div>
+    <div class="form-row"><label>Expected date (optional)</label><input id="poExpectedDate" type="date"></div>
+    <div class="form-row"><label>Notes (optional)</label><textarea id="poNotes" rows="2"></textarea></div>
+    <p id="poCreateStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" id="poCancelBtn" class="btn-secondary">Cancel</button>
+      <button type="button" id="poSubmitBtn" class="btn-primary">Create PO</button>
+    </div>
+  </div>
+</div>
+
+<!-- Receipt — hidden on screen, only ever shown via @media print when
+     body.printing-receipt is set (see receipt.js). Everything else on the
+     page is hidden for the duration of that print job. -->
+<div id="receiptPrintArea">
+  <div class="receipt">
+    <div class="receipt-header">
+      <div class="receipt-store">Caidic Hardware</div>
+      <div class="receipt-meta" id="receiptMeta"></div>
+    </div>
+    <div class="receipt-lines" id="receiptLines"></div>
+    <div class="receipt-totals" id="receiptTotals"></div>
+    <div class="receipt-footer">Thank you!</div>
   </div>
 </div>
 
