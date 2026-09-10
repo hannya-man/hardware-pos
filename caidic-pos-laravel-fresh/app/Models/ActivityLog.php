@@ -4,6 +4,7 @@ namespace App\Models;
 
 use App\Traits\HasUuid;
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ActivityLog extends Model
 {
@@ -20,6 +21,13 @@ class ActivityLog extends Model
         'client_created_at' => 'datetime',
         'details' => 'array',
     ];
+
+    // Lets Staff Logs show the actual staff member's name instead of a
+    // raw id. Nothing was resolving actor_id to a person before this.
+    public function actor(): BelongsTo
+    {
+        return $this->belongsTo(User::class, 'actor_id');
+    }
 
     protected static function booted(): void
     {

@@ -4,6 +4,7 @@ use App\Http\Controllers\Api\ActivityLogController;
 use App\Http\Controllers\Api\AnalyticsController;
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\CatalogController;
+use App\Http\Controllers\Api\CategoryController;
 use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\InventoryController;
 use App\Http\Controllers\Api\MaterialRequestController;
@@ -34,8 +35,18 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/auth/logout', [AuthController::class, 'logout']);
 
     Route::post('/returns', [SalesReturnController::class, 'store']);
+
+    // Add New Item — the SKU suggestion route must be registered before
+    // the {id} route below, or Laravel would try to treat "next-sku" as
+    // an id and send it to show()/update() instead.
+    Route::post('/products', [ProductController::class, 'store']);
+    Route::get('/products/next-sku', [ProductController::class, 'nextSku']);
     Route::get('/products/{id}', [ProductController::class, 'show']);
     Route::patch('/products/{id}', [ProductController::class, 'update']);
+
+    // Categories — a direct backup source for Add New Item's category
+    // list (see CategoryController).
+    Route::get('/categories', [CategoryController::class, 'index']);
 
     Route::get('/reconciliation/today', [ReconciliationController::class, 'today']);
     Route::post('/reconciliation', [ReconciliationController::class, 'store']);

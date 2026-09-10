@@ -25,7 +25,11 @@ class SalesReturnController extends Controller
             'product_id' => ['required', 'uuid', 'exists:products,id'],
             'quantity_returned' => ['required', 'numeric', 'min:0.001'],
             'condition' => ['required', 'in:good,damaged'],
-            'reason' => ['nullable', 'string', 'max:255'],
+            // Was nullable — now required. A return needs some kind of
+            // proof (a receipt number, or at minimum a written reason)
+            // before it's accepted; the frontend also enforces this, but
+            // the real boundary is here, same as the Gate above.
+            'reason' => ['required', 'string', 'min:3', 'max:255'],
             'client_created_at' => ['required', 'date'],
         ]);
 
