@@ -4,7 +4,7 @@
 
 import { db, getTerminalId, isProvisioned, setTerminalKey, getOpenShift } from './local-db.js';
 import { verifyStaffLogin, searchProducts, quickSelect, attachScannerListener, getProductByBarcode } from './input-handler.js';
-import { startSyncWorker, pullCatalog, completeSale, openShift, logActivity } from './sync-worker.js';
+import { startSyncWorker, pullCatalog, forceFullSync, flushOutbox, completeSale, openShift, logActivity } from './sync-worker.js';
 import {
   setAdminUser, renderActivity, renderShifts, renderVoid, renderReturns,
   renderReconciliation, renderAnalytics, renderStaff, renderArchives
@@ -58,12 +58,17 @@ function showPrompt(message, defaultValue = '') {
 // section in the sidebar; their `children` are the actual clickable
 // leaves. Only leaves have onEnter / a matching view div — groups are
 // just a visual container and are never passed to switchView().
+//
+// billing's onEnter pulls the latest catalog before drawing the grid —
+// this covers the common case (a stale local copy). If a device's local
+// copy is missing something more stubbornly, that's what the Sync Now
+// button (see doManualSync below) is for.
 const NAV_ITEMS = [
   { key: 'dashboard', label: 'Dashboard', roles: ['manager', 'owner'], onEnter: renderDashboard },
   {
     key: 'posTerminal', label: 'POS Terminal', roles: ['cashier', 'manager', 'owner'],
     children: [
-      { key: 'billing', label: 'Billing & Checkout', roles: ['cashier', 'manager', 'owner'], onEnter: () => renderGrid() },
+      { key: 'billing', label: 'Billing & Checkout', roles: ['cashier', 'manager', 'owner'], onEnter: async () => { await pullCatalog().catch(() => {}); await renderGrid(); } },
       { key: 'materialRequests', label: 'Material Pick Lists', roles: ['cashier', 'manager', 'owner'], onEnter: renderMaterialRequests },
     ],
   },
@@ -115,13 +120,24 @@ async function init() {
 
   startSyncWorker({
     onStatusChange: (status) => {
-      $('statusLabel').textContent = status === 'online' ? 'Online' : 'Offline';
+      $('statusLabel').textContent = status === 'online' ? 'Active' : 'Inactive';
       $('statusPill').classList.toggle('offline', status !== 'online');
     },
-    onNeedsProvisioning: () => window.alert('Terminal key missing or rejected — sync will not work until this device is re-provisioned.')
+    onNeedsProvisioning: () => window.alert('Terminal key missing or rejected. Sync will not work until this device is re-provisioned.')
   });
 
   await pullCatalog().catch(() => {}); // best-effort — offline on first launch is fine, staff grid just stays empty until it succeeds
+
+  // Safety net: if this device only knows about one staff member (or
+  // none) locally, that's almost always a stale or incomplete first sync
+  // rather than the true state of things, so start over completely, just
+  // this once, automatically. Harmless if there really is only one
+  // account so far — it just means one extra full check.
+  const userCount = await db.users.count();
+  if (userCount <= 1) {
+    await forceFullSync().catch(() => {});
+  }
+
   await renderStaffGrid();
 }
 
@@ -138,7 +154,7 @@ async function renderStaffGrid() {
           <span class="nm">${u.full_name}</span>
           <span class="rl${u.role === 'owner' ? ' owner' : ''}">${u.role}</span>
         </button>`).join('')
-    : '<p style="grid-column:1/-1; text-align:center; color:#6B655A; font-size:13px;">No staff synced yet — needs a connection at least once.</p>';
+    : '<p style="grid-column:1/-1; text-align:center; color:#6B655A; font-size:13px;">No staff found yet. Tap "Sync Now" below to check again.</p>';
 
   $('staffGrid').querySelectorAll('.staff-card').forEach((btn) => {
     btn.addEventListener('click', () => openPinPad(users.find((u) => u.id === btn.dataset.id)));
@@ -190,7 +206,7 @@ async function attemptLogin() {
     currentUser = user;
     await enterApp();
   } else {
-    $('loginError').textContent = 'Incorrect PIN — try again.';
+    $('loginError').textContent = 'Incorrect PIN. Try again.';
     pinDraft = '';
     renderPinDots();
   }
@@ -321,7 +337,10 @@ async function renderGrid() {
           <span class="nm">${p.name}</span>
           <span class="pr">${peso(p.unit_price)} / ${p.unit}</span>
         </button>`).join('')
-    : '<p style="color:#6B7280; font-size:13px;">No products synced yet.</p>';
+    : `<div class="empty-ticket" style="grid-column:1/-1;">
+         No items are loaded on this device yet.<br>
+         Tap "Sync Now" at the top of the screen, or check that this device has internet.
+       </div>`;
 
   $('grid').querySelectorAll('.qkey').forEach((btn) => {
     btn.addEventListener('click', () => addToCart(btn.dataset.id, 'quick-select'));
@@ -359,7 +378,7 @@ function renderCart() {
           <span class="amt">${peso(line.line_total)}</span>
           <button type="button" data-remove="${i}" aria-label="Remove">\u2715</button>
         </div>`).join('')
-    : '<div class="empty-ticket">No items yet \u2014 scan, search, or tap an item.</div>';
+    : '<div class="empty-ticket">No items yet. Scan, search, or tap an item.</div>';
 
   $('lines').querySelectorAll('[data-remove]').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -383,9 +402,9 @@ $('searchInput').addEventListener('input', async (e) => {
   if (!q.trim()) { $('searchResults').innerHTML = ''; return; }
 
   const hits = await searchProducts(q);
-  $('searchResults').innerHTML = hits.map((p) => `
-    <button type="button" class="search-hit" data-id="${p.id}">${p.name} \u2014 ${peso(p.unit_price)}</button>
-  `).join('');
+  $('searchResults').innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}">${p.name} (${peso(p.unit_price)})</button>`).join('')
+    : '<p class="placeholder-note" style="padding:6px 2px;">No matches.</p>';
 
   $('searchResults').querySelectorAll('.search-hit').forEach((btn) => {
     btn.addEventListener('click', () => {
@@ -432,5 +451,44 @@ $('chargeBtn').addEventListener('click', async () => {
   cart = [];
   renderCart();
 });
+
+// ---------------------------------------------------------------------------
+// MANUAL SYNC — the Sync Now button. Unlike the quiet, incremental pulls
+// that happen automatically, this always starts the catalog copy over
+// from scratch (forceFullSync) and says plainly what happened afterward,
+// so tapping it gives a real answer instead of just spinning silently.
+// Works from the login screen too, before anyone's signed in.
+// ---------------------------------------------------------------------------
+
+async function doManualSync() {
+  const buttons = [$('syncNowBtn'), $('syncNowLoginBtn')].filter(Boolean);
+  buttons.forEach((b) => { b.disabled = true; b.textContent = 'Syncing...'; });
+
+  try {
+    await flushOutbox();
+    const ok = await forceFullSync();
+
+    if (!ok) {
+      window.alert("Could not reach the server. Check that this device has internet, and that it has been set up with its one-time key.");
+    } else {
+      const productCount = await db.products.count();
+      const userCount = await db.users.count();
+      window.alert(`Synced. This device now has ${productCount} item(s) and ${userCount} staff account(s).`);
+    }
+
+    if (currentUser) {
+      await findLeaf(activeView)?.onEnter?.();
+    } else {
+      await renderStaffGrid();
+    }
+  } catch {
+    window.alert('Could not sync right now. Check the internet connection and try again.');
+  } finally {
+    buttons.forEach((b) => { b.disabled = false; b.textContent = 'Sync Now'; });
+  }
+}
+
+$('syncNowBtn')?.addEventListener('click', doManualSync);
+$('syncNowLoginBtn')?.addEventListener('click', doManualSync);
 
 init();

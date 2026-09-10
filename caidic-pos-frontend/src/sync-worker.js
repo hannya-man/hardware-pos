@@ -1,9 +1,8 @@
 // sync-worker.js
 // Local-write-then-enqueue, real connectivity detection, backoff push,
-// catalog pull — talking to the Laravel API. The one thing that changed
-// since the last version of this file: sync now authenticates as the
+// catalog pull — talking to the Laravel API. Sync authenticates as the
 // TERMINAL (X-Terminal-Key, set once at device setup), not as whichever
-// staff member happens to be logged in. Login itself moved fully local —
+// staff member happens to be logged in. Login itself is fully local —
 // see input-handler.js's verifyStaffLogin(). A per-user Sanctum token
 // still exists, but it's only fetched on demand, right before an
 // owner-gated call (Returns, Reconciliation, Analytics, Activity log) —
@@ -78,10 +77,10 @@ export async function logout() {
 }
 
 // ---------------------------------------------------------------------------
-// LOCAL WRITES — unchanged from the previous version. Sales/shifts/movements
-// still write locally first, always, regardless of any credential's state.
-// completeSale() still doesn't allocate against stock_batches yet — same
-// flagged TODO as before, not silently resolved here.
+// LOCAL WRITES — sales/shifts/movements write locally first, always,
+// regardless of any credential's state. completeSale() still doesn't
+// allocate against stock_batches yet (flagged repeatedly, not silently
+// resolved here).
 // ---------------------------------------------------------------------------
 
 async function enqueue(entity_type, entity_id, payload) {
@@ -283,8 +282,25 @@ export async function fetchStock(includeArchived = false) {
   return api(`/inventory/stock?include_archived=${includeArchived ? 1 : 0}`, { mode: 'user' });
 }
 
+// Add New Item — creates a brand new catalog entry.
+export async function createProduct(payload) {
+  return api('/products', { method: 'POST', body: payload, mode: 'user' });
+}
+
+// Suggests a ready-made item code for a given category, so nobody has to
+// invent one on the Add New Item screen.
+export async function fetchNextSku(category_id) {
+  return api(`/products/next-sku?category_id=${encodeURIComponent(category_id)}`, { mode: 'user' });
+}
+
 export async function updateProduct(id, payload) {
   return api(`/products/${id}`, { method: 'PATCH', body: payload, mode: 'user' });
+}
+
+// A direct, Sanctum-based category list. Used as a backup by Add New Item
+// whenever this device's own offline copy of the categories is empty.
+export async function fetchCategories() {
+  return api('/categories', { mode: 'user' });
 }
 
 // Material Pick Lists — viewing/fulfilling only. Creation is
@@ -462,6 +478,9 @@ export async function flushOutbox({ onNeedsProvisioning } = {}) {
 
 // ---------------------------------------------------------------------------
 // CATALOG PULL — terminal-key authenticated, same reasoning as the flush.
+// This stays incremental (only asks for what changed since last time) so
+// the automatic background checks stay light. forceFullSync() below is
+// the "start over completely" version used by the Sync Now button.
 // ---------------------------------------------------------------------------
 
 export async function pullCatalog() {
@@ -484,6 +503,19 @@ export async function pullCatalog() {
 
   await setSyncMeta('catalog_pulled_at', data.server_time);
   return true;
+}
+
+// Resets this device's sync cursor all the way back, then pulls again —
+// this makes the next pull ask the server for everything from scratch
+// instead of only "what changed since last time". This is what the Sync
+// Now button uses: if this device's own copy is missing something (an
+// item, a staff member, a whole category) for any reason, a normal
+// incremental pull can't fix that on its own, but starting over always
+// will, since it isn't relying on any assumption about what already
+// synced correctly before.
+export async function forceFullSync() {
+  await setSyncMeta('catalog_pulled_at', '1970-01-01T00:00:00Z');
+  return pullCatalog();
 }
 
 // ---------------------------------------------------------------------------

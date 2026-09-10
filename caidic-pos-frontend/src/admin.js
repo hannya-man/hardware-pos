@@ -19,6 +19,7 @@ import {
 const $ = (id) => document.getElementById(id);
 const peso = (n) => '\u20b1' + Number(n).toFixed(2);
 export const fmtTime = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+const NO_MATCH_NOTE = '<p class="placeholder-note" style="padding:6px 2px;">No matches. Try Sync Now if this item should be here.</p>';
 
 let adminUser = null;
 export function setAdminUser(user) { adminUser = user; }
@@ -57,7 +58,7 @@ function promptForServerPin() {
         cleanup();
         resolve();
       } catch {
-        error.textContent = "That didn't work — wrong PIN, or no connection right now.";
+        error.textContent = "That didn't work. Wrong PIN, or no connection right now.";
         error.hidden = false;
         input.value = '';
         input.focus();
@@ -90,7 +91,9 @@ export async function withServerAuth(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// ACTIVITY LOG — owner only (server-enforced via view-activity-log)
+// ACTIVITY LOG ("Staff Logs") — owner only (server-enforced via
+// view-activity-log). Shows the staff member's actual name using the
+// actor info the backend (ActivityLogController) now sends with each row.
 // ---------------------------------------------------------------------------
 
 export async function renderActivity() {
@@ -106,13 +109,13 @@ export async function renderActivity() {
       ? rows.map((r) => `
           <tr>
             <td>${fmtTime(r.client_created_at)}</td>
-            <td>${r.actor_id ? r.actor_id.slice(0, 8) : '\u2014'}</td>
+            <td>${r.actor?.full_name ?? (r.actor_id ? r.actor_id.slice(0, 8) : '-')}</td>
             <td>${r.event_type.replace(/_/g, ' ')}</td>
             <td>${r.entity_type ?? ''}</td>
           </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="4">No activity in this range.</td></tr>';
+      : '<tr class="empty-row"><td colspan="4">No activity in this range yet.</td></tr>';
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -137,11 +140,11 @@ export async function renderShifts() {
       ? shifts.map((s) => `
           <tr class="clickable-row" data-shift="${s.id}">
             <td>${fmtTime(s.started_at)}</td>
-            <td>${s.cashier?.full_name ?? '\u2014'}</td>
+            <td>${s.cashier?.full_name ?? '-'}</td>
             <td>${s.status}</td>
             <td class="amt-cell">${peso(s.opening_cash)}</td>
             <td class="amt-cell">${peso(s.sales_total ?? 0)}</td>
-            <td>${s.cash_discrepancy != null ? peso(s.cash_discrepancy) : '\u2014'}</td>
+            <td>${s.cash_discrepancy != null ? peso(s.cash_discrepancy) : '-'}</td>
           </tr>`).join('')
       : '<tr class="empty-row"><td colspan="6">No shifts yet.</td></tr>';
 
@@ -149,14 +152,14 @@ export async function renderShifts() {
       row.addEventListener('click', () => renderShiftDetail(row.dataset.shift, shifts.find((s) => s.id === row.dataset.shift)));
     });
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
 async function renderShiftDetail(shiftId, shiftRow) {
   $('shiftsListCard').hidden = true;
   $('shiftDetailCard').hidden = false;
-  $('shiftDetailTitle').textContent = `Sales \u2014 ${shiftRow?.cashier?.full_name ?? 'shift'}, ${fmtTime(shiftRow?.started_at)}`;
+  $('shiftDetailTitle').textContent = `Sales for ${shiftRow?.cashier?.full_name ?? 'shift'}, ${fmtTime(shiftRow?.started_at)}`;
 
   const tbody = $('shiftSalesTable').querySelector('tbody');
   tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Loading...</td></tr>';
@@ -210,7 +213,7 @@ async function loadVoidableSales() {
     const sales = result.data ?? result;
     drawVoidTable(sales);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -220,7 +223,7 @@ function drawVoidTable(sales) {
     ? sales.map((s) => `
         <tr>
           <td>${fmtTime(s.client_created_at)}</td>
-          <td>${s.cashier?.full_name ?? '\u2014'}</td>
+          <td>${s.cashier?.full_name ?? '-'}</td>
           <td class="amt-cell">${peso(s.total_amount)}</td>
           <td>${s.payment_method}</td>
           <td><button type="button" class="btn-void" data-void="${s.id}">Void</button></td>
@@ -238,7 +241,9 @@ function drawVoidTable(sales) {
 }
 
 // ---------------------------------------------------------------------------
-// RETURNS — owner only.
+// RETURNS — owner only. A return needs a reason or receipt number before
+// it can be accepted — this is the "proof" requirement, enforced on the
+// server too.
 // ---------------------------------------------------------------------------
 
 let selectedReturnProduct = null;
@@ -255,10 +260,11 @@ export function renderReturns() {
 }
 
 $('retProductSearch').addEventListener('input', async (e) => {
-  const hits = await searchProducts(e.target.value);
-  $('retProductResults').innerHTML = hits.map((p) => `
-    <button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}">${p.name} \u2014 ${p.sku}</button>
-  `).join('');
+  const query = e.target.value;
+  const hits = await searchProducts(query);
+  $('retProductResults').innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}">${p.name} (${p.sku})</button>`).join('')
+    : (query.trim() ? NO_MATCH_NOTE : '');
   $('retProductResults').querySelectorAll('.search-hit').forEach((btn) => {
     btn.addEventListener('click', () => {
       selectedReturnProduct = { id: btn.dataset.id, name: btn.dataset.name };
@@ -277,6 +283,13 @@ $('retSubmitBtn').addEventListener('click', async () => {
     return;
   }
 
+  const reason = $('retReason').value.trim();
+  if (!reason) {
+    status.textContent = 'Please write the receipt number or a reason first. This is needed as proof for the return.';
+    status.className = 'form-status err';
+    return;
+  }
+
   const condition = document.querySelector('input[name="retCondition"]:checked').value;
 
   try {
@@ -285,14 +298,14 @@ $('retSubmitBtn').addEventListener('click', async () => {
       product_id: selectedReturnProduct.id,
       quantity_returned: Number($('retQuantity').value),
       condition,
-      reason: $('retReason').value || null,
+      reason,
       client_created_at: new Date().toISOString()
     }));
-    status.textContent = `Return accepted \u2014 ${selectedReturnProduct.name} (${condition}).`;
+    status.textContent = `Return accepted: ${selectedReturnProduct.name} (${condition}).`;
     status.className = 'form-status ok';
     renderReturns();
   } catch (err) {
-    status.textContent = `Failed \u2014 ${err.message}`;
+    status.textContent = `Failed. ${err.message}`;
     status.className = 'form-status err';
   }
 });
@@ -313,8 +326,8 @@ export async function renderReconciliation() {
     $('recSystemOut').textContent = totals.system_qty_out;
     $('recSystemIn').textContent = totals.system_qty_in;
   } catch (err) {
-    $('recSystemOut').textContent = '\u2014';
-    $('recSystemIn').textContent = '\u2014';
+    $('recSystemOut').textContent = '-';
+    $('recSystemIn').textContent = '-';
   }
 }
 
@@ -330,11 +343,11 @@ $('recSubmitBtn').addEventListener('click', async () => {
       client_created_at: new Date().toISOString()
     }));
     status.textContent = result.status === 'matched'
-      ? 'Matched \u2014 day closed clean.'
-      : `Discrepancy logged (out: ${result.discrepancy_out}, in: ${result.discrepancy_in}) \u2014 acknowledged.`;
+      ? 'Matched. Day closed clean.'
+      : `Discrepancy logged (out: ${result.discrepancy_out}, in: ${result.discrepancy_in}). Acknowledged.`;
     status.className = 'form-status ok';
   } catch (err) {
-    status.textContent = `Failed \u2014 ${err.message}`;
+    status.textContent = `Failed. ${err.message}`;
     status.className = 'form-status err';
   }
 });
@@ -355,7 +368,7 @@ export async function renderAnalytics() {
     slowBody.innerHTML = moversRows(data.slow_movers, 'slow_mover');
     wireCycleCountRows();
   } catch (err) {
-    fastBody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load — ${err.message}</td></tr>`;
+    fastBody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -365,7 +378,7 @@ function moversRows(items, reason) {
     <tr>
       <td>${p.name}</td>
       <td class="amt-cell">${p.units_moved}</td>
-      <td class="amt-cell" id="sysqty-${p.id}">\u2014</td>
+      <td class="amt-cell" id="sysqty-${p.id}">-</td>
       <td><input type="number" class="cycle-input" step="0.001" data-count-product="${p.id}" data-reason="${reason}" placeholder="count"></td>
       <td><button type="button" class="btn-secondary" data-count-submit="${p.id}">Save</button></td>
     </tr>`).join('');
@@ -392,15 +405,21 @@ function wireCycleCountRows() {
         sysCell.textContent = result.system_quantity;
         sysCell.className = 'amt-cell ' + (Math.abs(result.variance) < 0.001 ? 'variance-ok' : 'variance-bad');
       } catch (err) {
-        window.alert(`Couldn't save count \u2014 ${err.message}`);
+        window.alert(`Couldn't save count. ${err.message}`);
       }
     });
   });
 }
 
 // ---------------------------------------------------------------------------
-// STAFF — manager+owner.
+// STAFF — manager+owner. Deactivating someone asks for confirmation
+// first. Edit lets any of a staff member's details be changed, including
+// resetting their own PIN — there was previously no way to change a PIN
+// or role for an account that already existed.
 // ---------------------------------------------------------------------------
+
+let staffCache = [];
+let editingStaffId = null;
 
 export async function renderStaff() {
   $('usrStatus').textContent = '';
@@ -410,10 +429,10 @@ export async function renderStaff() {
   tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
 
   try {
-    const users = await withServerAuth(() => fetchUsers());
-    drawStaffTable(users);
+    staffCache = await withServerAuth(() => fetchUsers());
+    drawStaffTable(staffCache);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -424,17 +443,71 @@ function drawStaffTable(users) {
       <td>${u.full_name}</td>
       <td>${u.role}</td>
       <td>${u.is_active ? 'Active' : 'Inactive'}</td>
-      <td><button type="button" class="btn-secondary" data-toggle="${u.id}" data-active="${u.is_active}">${u.is_active ? 'Deactivate' : 'Reactivate'}</button></td>
+      <td>
+        <button type="button" class="btn-secondary" data-edit-staff="${u.id}">Edit</button>
+        <button type="button" class="btn-secondary" data-toggle="${u.id}" data-active="${u.is_active}">${u.is_active ? 'Deactivate' : 'Reactivate'}</button>
+      </td>
     </tr>`).join('');
+
+  tbody.querySelectorAll('[data-edit-staff]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const user = users.find((u) => u.id === btn.dataset.editStaff);
+      if (user) openEditStaffModal(user);
+    });
+  });
 
   tbody.querySelectorAll('[data-toggle]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const nowActive = btn.dataset.active === 'true';
+      if (nowActive && !window.confirm('Are you sure you want to deactivate this staff member? They will not be able to log in until reactivated.')) {
+        return;
+      }
       await withServerAuth(() => updateUser(btn.dataset.toggle, { is_active: !nowActive }));
       renderStaff();
     });
   });
 }
+
+function openEditStaffModal(user) {
+  editingStaffId = user.id;
+  $('editStaffName').value = user.full_name;
+  $('editStaffRole').value = user.role;
+  $('editStaffPin').value = '';
+  $('editStaffStatus').textContent = '';
+  $('editStaffStatus').className = 'form-status';
+  $('editStaffOverlay').hidden = false;
+}
+
+$('editStaffCancelBtn').addEventListener('click', () => { $('editStaffOverlay').hidden = true; });
+
+$('editStaffSubmitBtn').addEventListener('click', async () => {
+  const status = $('editStaffStatus');
+  const full_name = $('editStaffName').value.trim();
+  const role = $('editStaffRole').value;
+  const pin = $('editStaffPin').value.trim();
+
+  if (!full_name) {
+    status.textContent = 'Name cannot be empty.';
+    status.className = 'form-status err';
+    return;
+  }
+  if (pin && pin.length !== 4) {
+    status.textContent = 'A new PIN must be exactly 4 digits, or left blank to keep the current one.';
+    status.className = 'form-status err';
+    return;
+  }
+
+  try {
+    await withServerAuth(() => updateUser(editingStaffId, { full_name, role, ...(pin ? { pin } : {}) }));
+    status.textContent = 'Saved.';
+    status.className = 'form-status ok';
+    setTimeout(() => { $('editStaffOverlay').hidden = true; }, 500);
+    renderStaff();
+  } catch (err) {
+    status.textContent = `Couldn't save. ${err.message}`;
+    status.className = 'form-status err';
+  }
+});
 
 $('usrAddBtn').addEventListener('click', async () => {
   const status = $('usrStatus');
@@ -455,7 +528,7 @@ $('usrAddBtn').addEventListener('click', async () => {
     $('usrPin').value = '';
     renderStaff();
   } catch (err) {
-    status.textContent = `Failed \u2014 ${err.message}`;
+    status.textContent = `Failed. ${err.message}`;
     status.className = 'form-status err';
   }
 });
@@ -493,7 +566,7 @@ export async function renderArchives() {
       });
     });
   } catch (err) {
-    itemsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load — ${err.message}</td></tr>`;
+    itemsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
   }
 
   try {
@@ -515,6 +588,6 @@ export async function renderArchives() {
       });
     });
   } catch (err) {
-    staffBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load — ${err.message}</td></tr>`;
+    staffBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
   }
 }

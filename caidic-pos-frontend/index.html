@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Caidic Hardware — POS</title>
+<title>Caidic Hardware POS</title>
 <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
@@ -19,6 +19,9 @@
       </div>
 
       <div id="staffGrid" class="staff-grid"></div>
+      <div style="text-align:center; margin-top:14px;">
+        <button type="button" id="syncNowLoginBtn" class="pin-back" style="margin:0;">Sync Now</button>
+      </div>
 
       <div id="pinPad" class="pin-pad-wrap" hidden>
         <button type="button" class="pin-back" id="pinBack">&larr; Not you?</button>
@@ -55,7 +58,14 @@
     <div class="hazard-edge"></div>
     <header class="app-header">
       <h1 id="viewTitle">POS Billing</h1>
-      <button id="statusPill" type="button"><span class="dot"></span><span id="statusLabel">Checking...</span></button>
+      <div class="header-status-group">
+        <button type="button" id="syncNowBtn">Sync Now</button>
+        <button id="statusPill" type="button"><span class="dot"></span><span id="statusLabel">Checking...</span></button>
+        <span class="help-wrap">
+          <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
+          <div class="help-pop">This shows if this device is connected to the internet.<br><br><b>Active</b> means connected. Everything saves to the cloud right away.<br><b>Inactive</b> means no internet right now. You can still make sales. They will upload automatically once the internet is back.</div>
+        </span>
+      </div>
     </header>
 
     <div class="view-body">
@@ -155,7 +165,12 @@
            manager/owner, toggled in inventory.js) ---------- -->
       <div id="viewMaterialRequests" class="view" hidden>
         <div class="card">
-          <h2>New pick list</h2>
+          <h2>New pick list
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
+              <div class="help-pop">A pick list is a note to the stockroom asking them to prepare certain items, for example for a big customer order or a delivery. It does not charge the customer. It's just a request to gather items.</div>
+            </span>
+          </h2>
           <div class="form-row">
             <label>Item</label>
             <input id="mrProductSearch" type="text" placeholder="Search by name or SKU...">
@@ -183,6 +198,7 @@
           <div class="filter-row">
             <input id="stockSearch" type="text" placeholder="Search by name or SKU...">
             <label class="archive-toggle"><input type="checkbox" id="stockArchivedToggle"> Show archived</label>
+            <button type="button" class="btn-secondary" id="addItemOpenBtn">+ Add New Item</button>
             <button type="button" class="btn-primary" id="receiveOpenBtn">+ Receive Stock</button>
           </div>
           <table class="data-table" id="stockTable">
@@ -195,10 +211,15 @@
       <!-- ---------- RECONCILIATION (owner only) ---------- -->
       <div id="viewReconciliation" class="view" hidden>
         <div class="card">
-          <h2>Today so far (system totals)</h2>
+          <h2>Today so far (system totals)
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
+              <div class="help-pop">This is what the computer already counted today from sales and deliveries. Compare it to what you count by hand below. If the numbers are different, that's fine. It just means someone should take a second look before closing the day.</div>
+            </span>
+          </h2>
           <div class="counter-row">
-            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">—</span></div>
-            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">—</span></div>
+            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">-</span></div>
+            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">-</span></div>
           </div>
           <h2>Physical count</h2>
           <div class="form-row"><label>Physical items out (receipts/slips)</label><input id="recPhysicalOut" type="number" step="0.001"></div>
@@ -240,7 +261,12 @@
       <!-- ---------- RETURNS (owner only) ---------- -->
       <div id="viewReturns" class="view" hidden>
         <div class="card">
-          <h2>Process a return</h2>
+          <h2>Process a return
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
+              <div class="help-pop">A return is when a customer brings an item back. "Good" means it can be resold and goes back into stock. "Damaged" means it cannot be sold again. A receipt number or a written reason is required. This is the proof that the return is real.</div>
+            </span>
+          </h2>
           <div class="form-row">
             <label>Product</label>
             <input id="retProductSearch" type="text" placeholder="Search by name or SKU...">
@@ -252,11 +278,11 @@
           <div class="form-row">
             <label>Condition</label>
             <div class="radio-row">
-              <label><input type="radio" name="retCondition" value="good" checked> Good — restock</label>
-              <label><input type="radio" name="retCondition" value="damaged"> Damaged — lock</label>
+              <label><input type="radio" name="retCondition" value="good" checked> Good, restock</label>
+              <label><input type="radio" name="retCondition" value="damaged"> Damaged, lock</label>
             </div>
           </div>
-          <div class="form-row"><label>Reason (optional)</label><textarea id="retReason" rows="2"></textarea></div>
+          <div class="form-row"><label>Receipt Number or Reason (required, this is the proof for the return)</label><textarea id="retReason" rows="2" placeholder="e.g. Receipt #1234, or explain why it's being returned"></textarea></div>
           <button type="button" class="btn-primary" id="retSubmitBtn">Accept return</button>
           <div id="retStatus" class="form-status"></div>
         </div>
@@ -276,7 +302,12 @@
       <!-- ---------- ANALYTICS / FAST-SLOW MOVERS (owner only) ---------- -->
       <div id="viewAnalytics" class="view" hidden>
         <div class="card">
-          <h2>Top 10 fast movers (7 days)</h2>
+          <h2>Top 10 fast movers (7 days)
+            <span class="help-wrap">
+              <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
+              <div class="help-pop">"Fast movers" are the items that sold the most in the last 7 days. "Slow movers" (below) barely sold at all. Use this to decide what to restock more of, and what's just taking up shelf space.</div>
+            </span>
+          </h2>
           <table class="data-table" id="fastMoversTable">
             <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
             <tbody></tbody>
@@ -311,21 +342,27 @@
         </div>
       </div>
 
-      <!-- ---------- ACTIVITY LOG (owner only) ---------- -->
+      <!-- ---------- STAFF LOGS (owner only) ---------- -->
       <div id="viewActivity" class="view" hidden>
         <div class="card">
           <h2>Filter</h2>
           <div class="filter-row">
             <select id="actEventType">
-              <option value="">All event types</option>
-              <option value="login">Login</option>
-              <option value="logout">Logout</option>
-              <option value="item_added">Item added</option>
+              <option value="">All activity</option>
+              <option value="login">Logged in</option>
+              <option value="logout">Logged out</option>
+              <option value="item_added">Item added to cart</option>
               <option value="barcode_scanned">Barcode scanned</option>
-              <option value="barcode_no_match">Barcode — no match</option>
-              <option value="order_cancelled">Order cancelled</option>
-              <option value="void_requested">Void requested</option>
-              <option value="no_sale_requested">No Sale requested</option>
+              <option value="barcode_no_match">Barcode not found</option>
+              <option value="price_changed">Price changed</option>
+              <option value="item_added_to_catalog">New item added to catalog</option>
+              <option value="item_details_updated">Item details updated</option>
+              <option value="item_archived">Item archived</option>
+              <option value="item_restored">Item restored</option>
+              <option value="staff_added">Staff added</option>
+              <option value="staff_updated">Staff info updated</option>
+              <option value="staff_deactivated">Staff deactivated</option>
+              <option value="staff_reactivated">Staff reactivated</option>
             </select>
             <button type="button" id="actFilterBtn" class="btn-secondary">Apply</button>
           </div>
@@ -387,7 +424,7 @@
 <div id="pinConfirmOverlay" class="overlay" hidden>
   <div class="modal">
     <h3>Confirm your PIN</h3>
-    <p class="sub">This action needs to reach the server — enter your PIN again to continue.</p>
+    <p class="sub">This action needs to reach the server. Enter your PIN again to continue.</p>
     <input id="pinConfirmInput" type="password" inputmode="numeric" maxlength="4" placeholder="PIN">
     <p id="pinConfirmError" class="modal-error" hidden></p>
     <div class="modal-actions">
@@ -417,6 +454,85 @@
     <div class="modal-actions">
       <button type="button" id="receiveCancelBtn" class="btn-secondary">Cancel</button>
       <button type="button" id="receiveSubmitBtn" class="btn-primary">Receive</button>
+    </div>
+  </div>
+</div>
+
+<!-- Add New Item modal — used from the Stock screen, for items that don't exist in the catalog yet -->
+<div id="addItemOverlay" class="overlay" hidden>
+  <div class="modal modal-wide">
+    <h3>Add New Item</h3>
+    <div class="form-row"><label>Item Code (SKU)</label><input id="addItemSku" type="text" placeholder="Fills in automatically once a category is picked"></div>
+    <div class="form-row"><label>Item Name</label><input id="addItemName" type="text" placeholder="e.g. Union Cement"></div>
+    <div class="form-row">
+      <label>Category</label>
+      <select id="addItemCategory"></select>
+    </div>
+    <div class="form-row">
+      <label>Unit</label>
+      <select id="addItemUnit">
+        <option value="pc">pc (piece)</option>
+        <option value="bag">bag</option>
+        <option value="sheet">sheet</option>
+        <option value="roll">roll</option>
+        <option value="kg">kg</option>
+        <option value="ft">ft</option>
+      </select>
+    </div>
+    <div class="form-row"><label>Selling Price</label><input id="addItemPrice" type="number" min="0" step="0.01" placeholder="0.00"></div>
+    <div class="form-row"><label>Low Stock Alert Level (optional)</label><input id="addItemReorder" type="number" min="0" step="1" value="10"></div>
+    <p id="addItemStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" id="addItemCancelBtn" class="btn-secondary">Cancel</button>
+      <button type="button" id="addItemSubmitBtn" class="btn-primary">Add Item</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Item modal — used from the Stock List to change an item's name, unit, price, or low stock level -->
+<div id="editItemOverlay" class="overlay" hidden>
+  <div class="modal modal-wide">
+    <h3>Edit Item</h3>
+    <div class="form-row"><label>Item Name</label><input id="editItemName" type="text"></div>
+    <div class="form-row">
+      <label>Unit</label>
+      <select id="editItemUnit">
+        <option value="pc">pc (piece)</option>
+        <option value="bag">bag</option>
+        <option value="sheet">sheet</option>
+        <option value="roll">roll</option>
+        <option value="kg">kg</option>
+        <option value="ft">ft</option>
+      </select>
+    </div>
+    <div class="form-row"><label>Selling Price</label><input id="editItemPrice" type="number" min="0" step="0.01"></div>
+    <div class="form-row"><label>Low Stock Alert Level</label><input id="editItemReorder" type="number" min="0" step="1"></div>
+    <p id="editItemStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" id="editItemCancelBtn" class="btn-secondary">Cancel</button>
+      <button type="button" id="editItemSubmitBtn" class="btn-primary">Save Changes</button>
+    </div>
+  </div>
+</div>
+
+<!-- Edit Staff modal — used from User Roles & Access to change a name, role, or reset a PIN -->
+<div id="editStaffOverlay" class="overlay" hidden>
+  <div class="modal">
+    <h3>Edit Staff</h3>
+    <div class="form-row"><label>Full Name</label><input id="editStaffName" type="text"></div>
+    <div class="form-row">
+      <label>Role</label>
+      <select id="editStaffRole">
+        <option value="cashier">Cashier</option>
+        <option value="manager">Manager</option>
+        <option value="owner">Owner</option>
+      </select>
+    </div>
+    <div class="form-row"><label>New PIN (leave blank to keep the current one)</label><input id="editStaffPin" type="text" inputmode="numeric" maxlength="4" placeholder="4-digit PIN"></div>
+    <p id="editStaffStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" id="editStaffCancelBtn" class="btn-secondary">Cancel</button>
+      <button type="button" id="editStaffSubmitBtn" class="btn-primary">Save Changes</button>
     </div>
   </div>
 </div>

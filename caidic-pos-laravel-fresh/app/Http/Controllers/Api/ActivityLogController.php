@@ -15,11 +15,15 @@ class ActivityLogController extends Controller
     // guessed the URL. Pattern review, not single-event catching: a
     // cashier who cancels orders at 5x their coworkers' rate is what this
     // is for, not any one cancelled order.
+    //
+    // Now eager-loads the actor's name — this is the actual fix for
+    // "Staff Logs doesn't work": the screen was rendering a raw actor_id
+    // because nothing here ever told it who that id belonged to.
     public function index(Request $request)
     {
         Gate::authorize('view-activity-log');
 
-        $query = ActivityLog::query()->latest('client_created_at');
+        $query = ActivityLog::with('actor:id,full_name,role')->latest('client_created_at');
 
         $query->when($request->actor_id, fn ($q, $v) => $q->where('actor_id', $v));
         $query->when($request->shift_id, fn ($q, $v) => $q->where('shift_id', $v));

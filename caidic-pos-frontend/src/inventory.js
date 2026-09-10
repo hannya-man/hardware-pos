@@ -1,18 +1,22 @@
 // inventory.js — Stock and Price List read from the same /inventory/stock
 // call and just render it differently. Receive Stock writes locally first
 // via the existing receiveStock() from sync-worker.js. Material Pick Lists
-// and Supplier Orders (Purchase Orders) live here too now.
+// and Supplier Orders (Purchase Orders) live here too. Add New Item and
+// Edit Item are the newest additions — see those sections below.
 
 import { withServerAuth, fmtTime } from './admin.js';
 import {
-  fetchStock, updateProduct, receiveStock,
+  fetchStock, updateProduct, createProduct, fetchNextSku, fetchCategories,
+  receiveStock, pullCatalog,
   fetchMaterialRequests, fulfillMaterialRequest, submitMaterialRequest,
   fetchSuppliers, createSupplier, fetchPurchaseOrders, createPurchaseOrder, receivePurchaseOrder
 } from './sync-worker.js';
 import { searchProducts } from './input-handler.js';
+import { db } from './local-db.js';
 
 const $ = (id) => document.getElementById(id);
 const peso = (n) => '\u20b1' + Number(n).toFixed(2);
+const NO_MATCH_NOTE = '<p class="placeholder-note" style="padding:6px 2px;">No matches. Try Sync Now if this item should be here.</p>';
 
 let inventoryUser = null;
 export function setInventoryUser(user) { inventoryUser = user; }
@@ -29,6 +33,7 @@ export async function renderStock() {
   $('stockArchivedToggle').onchange = (e) => { stockShowArchived = e.target.checked; loadStock(); };
   $('stockSearch').oninput = () => drawStockTable(lastStockData);
   $('receiveOpenBtn').onclick = openReceiveModal;
+  $('addItemOpenBtn').onclick = openAddItemModal;
 
   await loadStock();
 }
@@ -40,7 +45,7 @@ async function loadStock() {
     lastStockData = await withServerAuth(() => fetchStock(stockShowArchived));
     drawStockTable(lastStockData);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="7">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -58,18 +63,79 @@ function drawStockTable(rows) {
           <td class="amt-cell ${r.damaged > 0 ? 'variance-bad' : ''}">${r.damaged}</td>
           <td class="amt-cell ${r.low_stock ? 'variance-bad' : ''}">${r.low_stock ? 'Low' : 'OK'}</td>
           <td>${r.is_active ? 'Active' : 'Archived'}</td>
-          <td><button type="button" class="btn-secondary" data-archive="${r.id}" data-active="${r.is_active}">${r.is_active ? 'Archive' : 'Restore'}</button></td>
+          <td>
+            <button type="button" class="btn-secondary" data-edit="${r.id}">Edit</button>
+            <button type="button" class="btn-secondary" data-archive="${r.id}" data-active="${r.is_active}">${r.is_active ? 'Archive' : 'Restore'}</button>
+          </td>
         </tr>`).join('')
     : '<tr class="empty-row"><td colspan="7">No items match.</td></tr>';
+
+  tbody.querySelectorAll('[data-edit]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const row = filtered.find((r) => r.id === btn.dataset.edit);
+      if (row) openEditItemModal(row);
+    });
+  });
 
   tbody.querySelectorAll('[data-archive]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       const nowActive = btn.dataset.active === 'true';
+      if (nowActive && !window.confirm('Are you sure you want to archive this item? It will be hidden from Stock and Billing, but you can restore it later from Archives.')) {
+        return;
+      }
       await withServerAuth(() => updateProduct(btn.dataset.archive, { is_active: !nowActive }));
+      await pullCatalog().catch(() => {}); // keep this terminal's own offline copy in step with the change right away
       await loadStock();
     });
   });
 }
+
+// ---------------------------------------------------------------------------
+// EDIT ITEM — full editing from the Stock List: name, unit, price, and
+// low stock alert level, not just archive/restore. Item code (SKU) and
+// category aren't changed here on purpose, to keep this simple.
+// ---------------------------------------------------------------------------
+
+let editingItemId = null;
+
+function openEditItemModal(row) {
+  editingItemId = row.id;
+  $('editItemName').value = row.name;
+  $('editItemUnit').value = row.unit ?? 'pc';
+  $('editItemPrice').value = row.unit_price;
+  $('editItemReorder').value = row.reorder_level ?? 10;
+  $('editItemStatus').textContent = '';
+  $('editItemStatus').className = 'form-status';
+  $('editItemOverlay').hidden = false;
+}
+
+$('editItemCancelBtn').addEventListener('click', () => { $('editItemOverlay').hidden = true; });
+
+$('editItemSubmitBtn').addEventListener('click', async () => {
+  const status = $('editItemStatus');
+  const name = $('editItemName').value.trim();
+  const unit = $('editItemUnit').value;
+  const unit_price = Number($('editItemPrice').value);
+  const reorder_level = Number($('editItemReorder').value) || 0;
+
+  if (!name || !unit_price || unit_price <= 0) {
+    status.textContent = 'Please fill in a name and a price above 0.';
+    status.className = 'form-status err';
+    return;
+  }
+
+  try {
+    await withServerAuth(() => updateProduct(editingItemId, { name, unit, unit_price, reorder_level }));
+    status.textContent = 'Saved.';
+    status.className = 'form-status ok';
+    await pullCatalog().catch(() => {});
+    await loadStock();
+    setTimeout(() => { $('editItemOverlay').hidden = true; }, 500);
+  } catch (err) {
+    status.textContent = `Couldn't save. ${err.message}`;
+    status.className = 'form-status err';
+  }
+});
 
 // ---------------------------------------------------------------------------
 // RECEIVE STOCK
@@ -89,10 +155,11 @@ function openReceiveModal() {
 $('receiveCancelBtn').addEventListener('click', () => { $('receiveOverlay').hidden = true; });
 
 $('receiveProductSearch').addEventListener('input', async (e) => {
-  const hits = await searchProducts(e.target.value);
-  $('receiveProductResults').innerHTML = hits.map((p) => `
-    <button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}">${p.name} \u2014 ${p.sku}</button>
-  `).join('');
+  const query = e.target.value;
+  const hits = await searchProducts(query);
+  $('receiveProductResults').innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}">${p.name} (${p.sku})</button>`).join('')
+    : (query.trim() ? NO_MATCH_NOTE : '');
   $('receiveProductResults').querySelectorAll('.search-hit').forEach((btn) => {
     btn.addEventListener('click', () => {
       $('receiveSelected').textContent = btn.dataset.name;
@@ -119,10 +186,106 @@ $('receiveSubmitBtn').addEventListener('click', async () => {
     damaged_quantity: Number($('receiveDamagedQty').value) || 0, actor_id: inventoryUser.id,
   });
 
-  status.textContent = 'Received \u2014 syncs automatically.';
+  status.textContent = 'Received. It will sync automatically.';
   status.className = 'form-status ok';
   await loadStock();
   setTimeout(() => { $('receiveOverlay').hidden = true; }, 700);
+});
+
+// ---------------------------------------------------------------------------
+// ADD NEW ITEM — lets a manager/owner create a brand new SKU. Before this,
+// the only catalog options were editing the price or archiving/restoring
+// an item that already existed from the original seeded list — there was
+// no way to add something new at all. Same server gate as everything else
+// on this screen (manage-catalog).
+//
+// The item code (SKU) is suggested automatically as soon as a category
+// is picked (see suggestSku below) and the barcode is generated entirely
+// on the server — nobody needs to invent either one by hand. The
+// suggested SKU can still be typed over if wanted.
+//
+// Categories come from this device's own local copy first (fast, works
+// offline); if that copy is empty for any reason, it falls back to
+// asking the server directly.
+// ---------------------------------------------------------------------------
+
+let lastSuggestedSku = '';
+
+async function openAddItemModal() {
+  $('addItemStatus').textContent = '';
+  $('addItemStatus').className = 'form-status';
+  $('addItemSku').value = '';
+  lastSuggestedSku = '';
+  $('addItemName').value = '';
+  $('addItemPrice').value = '';
+  $('addItemUnit').value = 'pc';
+  $('addItemReorder').value = '10';
+  $('addItemOverlay').hidden = false;
+  $('addItemCategory').innerHTML = '<option value="">Loading categories...</option>';
+
+  await pullCatalog().catch(() => {});
+  let categories = await db.categories.orderBy('name').toArray();
+
+  if (!categories.length) {
+    try {
+      categories = await withServerAuth(() => fetchCategories());
+    } catch {
+      categories = [];
+    }
+  }
+
+  $('addItemCategory').innerHTML = categories.length
+    ? categories.map((c) => `<option value="${c.id}">${c.name}</option>`).join('')
+    : '<option value="">No categories found</option>';
+
+  if (categories.length) await suggestSku();
+}
+
+async function suggestSku() {
+  const categoryId = $('addItemCategory').value;
+  if (!categoryId) return;
+
+  const currentValue = $('addItemSku').value.trim();
+  if (currentValue && currentValue !== lastSuggestedSku) return; // they've typed their own code, leave it alone
+
+  try {
+    const { sku } = await withServerAuth(() => fetchNextSku(categoryId));
+    $('addItemSku').value = sku;
+    lastSuggestedSku = sku;
+  } catch {
+    // best-effort suggestion only, not required to add the item
+  }
+}
+
+$('addItemCategory').addEventListener('change', suggestSku);
+$('addItemCancelBtn').addEventListener('click', () => { $('addItemOverlay').hidden = true; });
+
+$('addItemSubmitBtn').addEventListener('click', async () => {
+  const status = $('addItemStatus');
+  const sku = $('addItemSku').value.trim();
+  const name = $('addItemName').value.trim();
+  const category_id = $('addItemCategory').value;
+  const unit = $('addItemUnit').value;
+  const unit_price = Number($('addItemPrice').value);
+  const reorder_level = Number($('addItemReorder').value) || 10;
+
+  if (!sku || !name || !category_id || !unit_price || unit_price <= 0) {
+    status.textContent = 'Please fill in the item code, name, category, and a price above 0.';
+    status.className = 'form-status err';
+    return;
+  }
+
+  try {
+    await withServerAuth(() => createProduct({ sku, name, category_id, unit, unit_price, reorder_level }));
+    status.textContent = 'Item added.';
+    status.className = 'form-status ok';
+    await pullCatalog().catch(() => {}); // so it shows up in Billing on this device right away, not after the next background sync
+    await loadStock();
+    setTimeout(() => { $('addItemOverlay').hidden = true; }, 700);
+  } catch (err) {
+    status.textContent = `Couldn't add item. ${err.message}`;
+    status.className = 'form-status err';
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -144,7 +307,7 @@ async function loadPriceList() {
     lastPriceListData = await withServerAuth(() => fetchStock(false));
     drawPriceListTable(lastPriceListData);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -183,9 +346,10 @@ function editPrice(cell) {
       await withServerAuth(() => updateProduct(cell.dataset.id, { unit_price: newPrice }));
       cell.dataset.price = newPrice;
       cell.textContent = peso(newPrice);
+      await pullCatalog().catch(() => {}); // keep this terminal's own offline copy in step with the change right away
     } catch (err) {
       cell.textContent = peso(current);
-      window.alert(`Couldn't update price \u2014 ${err.message}`);
+      window.alert(`Couldn't update price. ${err.message}`);
     }
   };
 
@@ -221,10 +385,11 @@ export async function renderMaterialRequests() {
 }
 
 $('mrProductSearch').addEventListener('input', async (e) => {
-  const hits = await searchProducts(e.target.value);
-  $('mrProductResults').innerHTML = hits.map((p) => `
-    <button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}" data-sku="${p.sku}">${p.name} \u2014 ${p.sku}</button>
-  `).join('');
+  const query = e.target.value;
+  const hits = await searchProducts(query);
+  $('mrProductResults').innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}" data-sku="${p.sku}">${p.name} (${p.sku})</button>`).join('')
+    : (query.trim() ? NO_MATCH_NOTE : '');
   $('mrProductResults').querySelectorAll('.search-hit').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (!mrItems.find((i) => i.product_id === btn.dataset.id)) {
@@ -277,7 +442,7 @@ $('mrSubmitBtn').addEventListener('click', async () => {
     notes: $('mrNotes').value || null,
   });
 
-  status.textContent = 'Sent \u2014 syncs automatically.';
+  status.textContent = 'Sent. It will sync automatically.';
   status.className = 'form-status ok';
   mrItems = [];
   drawMrItems();
@@ -295,7 +460,7 @@ async function loadMaterialRequests() {
     const result = await withServerAuth(() => fetchMaterialRequests(showAll ? {} : { status: 'pending' }));
     drawMaterialRequestsTable(result.data ?? result);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -305,7 +470,7 @@ function drawMaterialRequestsTable(requests) {
     ? requests.map((r) => `
         <tr class="${r.status === 'fulfilled' ? 'row-archived' : ''}">
           <td>${fmtTime(r.client_created_at)}</td>
-          <td>${r.requested_by?.full_name ?? '\u2014'}</td>
+          <td>${r.requested_by?.full_name ?? '-'}</td>
           <td>${r.items.map((i) => `${i.name_snapshot} \u00d7${i.quantity_requested}`).join('<br>')}</td>
           <td>${r.notes ?? ''}</td>
           <td>${r.status === 'pending'
@@ -344,7 +509,7 @@ async function loadPurchaseOrders() {
     const result = await withServerAuth(() => fetchPurchaseOrders());
     drawPurchaseOrdersTable(result.data ?? result);
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Couldn't load — ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
@@ -354,10 +519,10 @@ function drawPurchaseOrdersTable(pos) {
     ? pos.map((po) => `
         <tr class="${po.status !== 'pending' ? 'row-archived' : ''}">
           <td>${po.po_number}</td>
-          <td>${po.supplier?.name ?? '\u2014'}</td>
+          <td>${po.supplier?.name ?? '-'}</td>
           <td>${po.items.map((i) => `${i.name_snapshot} \u00d7${i.quantity_ordered}`).join('<br>')}</td>
           <td>${po.status}</td>
-          <td>${po.expected_date ? new Date(po.expected_date).toLocaleDateString('en-PH') : '\u2014'}</td>
+          <td>${po.expected_date ? new Date(po.expected_date).toLocaleDateString('en-PH') : '-'}</td>
           <td>${po.status === 'pending'
             ? `<button type="button" class="btn-secondary" data-receive-po="${po.id}">Mark Received</button>`
             : ''}</td>
@@ -390,7 +555,7 @@ async function openPoModal() {
     supplierCache = await withServerAuth(() => fetchSuppliers());
     drawSupplierOptions();
   } catch (err) {
-    $('poSupplierSelect').innerHTML = '<option value="">Couldn\'t load suppliers</option>';
+    $('poSupplierSelect').innerHTML = '<option value="">Could not load suppliers</option>';
   }
 }
 
@@ -421,10 +586,11 @@ $('poNewSupplierSave').addEventListener('click', async () => {
 });
 
 $('poProductSearch').addEventListener('input', async (e) => {
-  const hits = await searchProducts(e.target.value);
-  $('poProductResults').innerHTML = hits.map((p) => `
-    <button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}" data-sku="${p.sku}">${p.name} \u2014 ${p.sku}</button>
-  `).join('');
+  const query = e.target.value;
+  const hits = await searchProducts(query);
+  $('poProductResults').innerHTML = hits.length
+    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}" data-sku="${p.sku}">${p.name} (${p.sku})</button>`).join('')
+    : (query.trim() ? NO_MATCH_NOTE : '');
   $('poProductResults').querySelectorAll('.search-hit').forEach((btn) => {
     btn.addEventListener('click', () => {
       if (!poItems.find((i) => i.product_id === btn.dataset.id)) {
@@ -489,7 +655,7 @@ $('poSubmitBtn').addEventListener('click', async () => {
     await loadPurchaseOrders();
     setTimeout(() => { $('poCreateOverlay').hidden = true; }, 700);
   } catch (err) {
-    status.textContent = `Failed \u2014 ${err.message}`;
+    status.textContent = `Failed. ${err.message}`;
     status.className = 'form-status err';
   }
 });

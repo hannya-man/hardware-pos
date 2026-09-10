@@ -1,3 +1,5 @@
-C:\Users\hyewo\Downloads\php-8.5.10-Win32-vs17-x64\php.exe artisan serve
+    C:\Users\hyewo\Downloads\php-8.5.10-Win32-vs17-x64\php.exe artisan serve
 
 C:\Users\hyewo\Downloads\php-8.5.10-Win32-vs17-x64\php.exe artisan migrate
+
+C:\Users\hyewo\Downloads\php-8.5.10-Win32-vs17-x64\php.exe artisan db:see
