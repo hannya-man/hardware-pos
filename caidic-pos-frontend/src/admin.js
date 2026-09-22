@@ -13,6 +13,7 @@ import {
   submitReturn, fetchTodayReconciliation, submitReconciliation,
   fetchMovers, submitCycleCount,
   fetchUsers, createUser, updateUser,
+  setupTwoFactor, verifyTwoFactor, disableTwoFactor,
   fetchStock, updateProduct
 } from './sync-worker.js';
 
@@ -20,6 +21,7 @@ const $ = (id) => document.getElementById(id);
 const peso = (n) => '\u20b1' + Number(n).toFixed(2);
 export const fmtTime = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 const NO_MATCH_NOTE = '<p class="placeholder-note" style="padding:6px 2px;">No matches. Try Sync Now if this item should be here.</p>';
+const pinLengthFor = (role) => (role === 'owner' ? 6 : 4);
 
 let adminUser = null;
 export function setAdminUser(user) { adminUser = user; }
@@ -91,35 +93,162 @@ export async function withServerAuth(fn) {
 }
 
 // ---------------------------------------------------------------------------
-// ACTIVITY LOG ("Staff Logs") — owner only (server-enforced via
-// view-activity-log). Shows the staff member's actual name using the
-// actor info the backend (ActivityLogController) now sends with each row.
+// STAFF LOGS — owner only. Redesigned around accounts instead of a flat
+// filtered table: one row per staff member, a View button that opens
+// that person's own activity (when they clocked in and out, and
+// everything logged in between, with the IP address it came from), and
+// a Download button that saves just their most recent shift as a CSV
+// file, not their whole history. Nothing here is editable — this screen
+// only ever reads and exports, the same as the reference layout this
+// was modeled on.
 // ---------------------------------------------------------------------------
 
+let logAccounts = [];
+let currentLogAccount = null;
+
 export async function renderActivity() {
-  const eventType = $('actEventType').value;
-  const tbody = $('activityTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
+  $('staffLogsDetailCard').hidden = true;
+  $('staffLogsListCard').hidden = false;
+
+  const tbody = $('staffLogsAccountsTable').querySelector('tbody');
+  tbody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
 
   try {
-    const result = await withServerAuth(() => fetchActivityLog(eventType ? { event_type: eventType } : {}));
-    const rows = result.data ?? result;
-
-    tbody.innerHTML = rows.length
-      ? rows.map((r) => `
+    logAccounts = await withServerAuth(() => fetchUsers());
+    tbody.innerHTML = logAccounts.length
+      ? logAccounts.map((u) => `
           <tr>
-            <td>${fmtTime(r.client_created_at)}</td>
-            <td>${r.actor?.full_name ?? (r.actor_id ? r.actor_id.slice(0, 8) : '-')}</td>
-            <td>${r.event_type.replace(/_/g, ' ')}</td>
-            <td>${r.entity_type ?? ''}</td>
+            <td>${u.full_name}</td>
+            <td>${u.role}</td>
+            <td>
+              <button type="button" class="btn-secondary" data-view-account="${u.id}">View</button>
+              <button type="button" class="btn-secondary" data-download-account="${u.id}">Download</button>
+            </td>
           </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="4">No activity in this range yet.</td></tr>';
+      : '<tr class="empty-row"><td colspan="3">No staff accounts yet.</td></tr>';
+
+    tbody.querySelectorAll('[data-view-account]').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        const user = logAccounts.find((u) => u.id === btn.dataset.viewAccount);
+        if (user) openAccountLog(user);
+      });
+    });
+    tbody.querySelectorAll('[data-download-account]').forEach((btn) => {
+      btn.addEventListener('click', async () => {
+        const user = logAccounts.find((u) => u.id === btn.dataset.downloadAccount);
+        if (user) await downloadLastShift(btn, user);
+      });
+    });
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
+    tbody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
   }
 }
 
-$('actFilterBtn').addEventListener('click', renderActivity);
+async function openAccountLog(user) {
+  currentLogAccount = user;
+  $('staffLogsListCard').hidden = true;
+  $('staffLogsDetailCard').hidden = false;
+  $('staffLogsDetailTitle').textContent = user.full_name;
+
+  const shiftsBody = $('staffLogsShiftsTable').querySelector('tbody');
+  shiftsBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
+  const activityBody = $('staffLogsActivityTable').querySelector('tbody');
+  activityBody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
+
+  try {
+    const shiftResult = await withServerAuth(() => fetchShifts({ cashier_id: user.id }));
+    const shifts = (shiftResult.data ?? shiftResult).slice(0, 10);
+    shiftsBody.innerHTML = shifts.length
+      ? shifts.map((s) => `
+          <tr>
+            <td>${fmtTime(s.started_at)}</td>
+            <td>${s.ended_at ? fmtTime(s.ended_at) : 'Still open'}</td>
+            <td>${s.status}</td>
+          </tr>`).join('')
+      : '<tr class="empty-row"><td colspan="3">No shifts yet.</td></tr>';
+  } catch (err) {
+    shiftsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
+  }
+
+  try {
+    const result = await withServerAuth(() => fetchActivityLog({ actor_id: user.id }));
+    const rows = result.data ?? result;
+    activityBody.innerHTML = rows.length
+      ? rows.map((r) => `
+          <tr>
+            <td>${fmtTime(r.client_created_at)}</td>
+            <td>${r.event_type.replace(/_/g, ' ')}</td>
+            <td>${r.entity_type ?? ''}</td>
+            <td>${r.ip_address ?? '\u2014'}</td>
+          </tr>`).join('')
+      : '<tr class="empty-row"><td colspan="4">No activity recorded yet.</td></tr>';
+  } catch (err) {
+    activityBody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
+  }
+}
+
+$('staffLogsBackBtn').addEventListener('click', renderActivity);
+
+// Saves just the most recent shift's activity as a CSV file — not the
+// account's whole history — matching "download" being a quick recent
+// check, not a full export.
+async function downloadLastShift(button, user) {
+  const originalLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Preparing...';
+
+  try {
+    const shiftResult = await withServerAuth(() => fetchShifts({ cashier_id: user.id }));
+    const shifts = shiftResult.data ?? shiftResult;
+
+    if (!shifts.length) {
+      window.alert(`${user.full_name} has no shifts yet.`);
+      return;
+    }
+
+    const lastShift = shifts[0]; // already sorted newest first by the server
+    const activityResult = await withServerAuth(() => fetchActivityLog({ shift_id: lastShift.id }));
+    const rows = activityResult.data ?? activityResult;
+
+    const header = ['Date & Time', 'Activity', 'Entity', 'IP Address'];
+    const lines = [header.map(csvCell).join(',')];
+    rows.forEach((r) => {
+      lines.push([
+        fmtTime(r.client_created_at),
+        r.event_type.replace(/_/g, ' '),
+        r.entity_type ?? '',
+        r.ip_address ?? '',
+      ].map(csvCell).join(','));
+    });
+
+    downloadTextFile(`${slugify(user.full_name)}-last-shift.csv`, lines.join('\r\n'));
+  } catch (err) {
+    window.alert(`Couldn't prepare the download. ${err.message}`);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalLabel;
+  }
+}
+
+function csvCell(value) {
+  return `"${String(value ?? '').replace(/"/g, '""')}"`;
+}
+
+function slugify(name) {
+  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'staff';
+}
+
+function downloadTextFile(filename, content) {
+  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
 
 // ---------------------------------------------------------------------------
 // SHIFTS — "how much did this shift make", and admin void. manager+owner.
@@ -140,11 +269,11 @@ export async function renderShifts() {
       ? shifts.map((s) => `
           <tr class="clickable-row" data-shift="${s.id}">
             <td>${fmtTime(s.started_at)}</td>
-            <td>${s.cashier?.full_name ?? '-'}</td>
+            <td>${s.cashier?.full_name ?? '\u2014'}</td>
             <td>${s.status}</td>
             <td class="amt-cell">${peso(s.opening_cash)}</td>
             <td class="amt-cell">${peso(s.sales_total ?? 0)}</td>
-            <td>${s.cash_discrepancy != null ? peso(s.cash_discrepancy) : '-'}</td>
+            <td>${s.cash_discrepancy != null ? peso(s.cash_discrepancy) : '\u2014'}</td>
           </tr>`).join('')
       : '<tr class="empty-row"><td colspan="6">No shifts yet.</td></tr>';
 
@@ -223,7 +352,7 @@ function drawVoidTable(sales) {
     ? sales.map((s) => `
         <tr>
           <td>${fmtTime(s.client_created_at)}</td>
-          <td>${s.cashier?.full_name ?? '-'}</td>
+          <td>${s.cashier?.full_name ?? '\u2014'}</td>
           <td class="amt-cell">${peso(s.total_amount)}</td>
           <td>${s.payment_method}</td>
           <td><button type="button" class="btn-void" data-void="${s.id}">Void</button></td>
@@ -414,34 +543,45 @@ function wireCycleCountRows() {
 // ---------------------------------------------------------------------------
 // STAFF — manager+owner. Deactivating someone asks for confirmation
 // first. Edit lets any of a staff member's details be changed, including
-// resetting their own PIN — there was previously no way to change a PIN
-// or role for an account that already existed.
+// resetting a PIN — this is also how an owner changes their own PIN.
+// Owner accounts get a 6-digit PIN and can turn on two-factor login with
+// Google Authenticator; cashier and manager accounts stay at 4 digits.
 // ---------------------------------------------------------------------------
 
-let staffCache = [];
 let editingStaffId = null;
+let editingStaffUser = null;
 
 export async function renderStaff() {
   $('usrStatus').textContent = '';
   $('usrStatus').className = 'form-status';
+  applyPinFieldFor('usrRole', 'usrPin');
 
   const tbody = $('usersTable').querySelector('tbody');
   tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
 
   try {
-    staffCache = await withServerAuth(() => fetchUsers());
-    drawStaffTable(staffCache);
+    const users = await withServerAuth(() => fetchUsers());
+    drawStaffTable(users);
   } catch (err) {
     tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
   }
 }
+
+function applyPinFieldFor(roleSelectId, pinInputId) {
+  const isOwner = $(roleSelectId).value === 'owner';
+  const len = pinLengthFor($(roleSelectId).value);
+  $(pinInputId).maxLength = len;
+  $(pinInputId).placeholder = isOwner ? `${len}-digit PIN` : `${len}-digit PIN`;
+}
+
+$('usrRole').addEventListener('change', () => applyPinFieldFor('usrRole', 'usrPin'));
 
 function drawStaffTable(users) {
   const tbody = $('usersTable').querySelector('tbody');
   tbody.innerHTML = users.map((u) => `
     <tr>
       <td>${u.full_name}</td>
-      <td>${u.role}</td>
+      <td>${u.role}${u.role === 'owner' && u.totp_enabled ? ' (2FA on)' : ''}</td>
       <td>${u.is_active ? 'Active' : 'Inactive'}</td>
       <td>
         <button type="button" class="btn-secondary" data-edit-staff="${u.id}">Edit</button>
@@ -470,13 +610,31 @@ function drawStaffTable(users) {
 
 function openEditStaffModal(user) {
   editingStaffId = user.id;
+  editingStaffUser = { ...user };
   $('editStaffName').value = user.full_name;
   $('editStaffRole').value = user.role;
   $('editStaffPin').value = '';
+  applyPinFieldFor('editStaffRole', 'editStaffPin');
   $('editStaffStatus').textContent = '';
   $('editStaffStatus').className = 'form-status';
+
+  refreshTwoFaSection();
   $('editStaffOverlay').hidden = false;
 }
+
+function refreshTwoFaSection() {
+  const isOwner = $('editStaffRole').value === 'owner';
+  $('editStaffTwoFaSection').hidden = !isOwner;
+  if (!isOwner) return;
+  const enabled = !!editingStaffUser?.totp_enabled;
+  $('editStaffTwoFaStatus').textContent = enabled ? 'On' : 'Off';
+  $('editStaffTwoFaToggle').textContent = enabled ? 'Turn Off' : 'Set Up';
+}
+
+$('editStaffRole').addEventListener('change', () => {
+  applyPinFieldFor('editStaffRole', 'editStaffPin');
+  refreshTwoFaSection();
+});
 
 $('editStaffCancelBtn').addEventListener('click', () => { $('editStaffOverlay').hidden = true; });
 
@@ -485,14 +643,15 @@ $('editStaffSubmitBtn').addEventListener('click', async () => {
   const full_name = $('editStaffName').value.trim();
   const role = $('editStaffRole').value;
   const pin = $('editStaffPin').value.trim();
+  const expectedLen = pinLengthFor(role);
 
   if (!full_name) {
     status.textContent = 'Name cannot be empty.';
     status.className = 'form-status err';
     return;
   }
-  if (pin && pin.length !== 4) {
-    status.textContent = 'A new PIN must be exactly 4 digits, or left blank to keep the current one.';
+  if (pin && pin.length !== expectedLen) {
+    status.textContent = `A new PIN for this role must be exactly ${expectedLen} digits, or left blank to keep the current one.`;
     status.className = 'form-status err';
     return;
   }
@@ -509,19 +668,85 @@ $('editStaffSubmitBtn').addEventListener('click', async () => {
   }
 });
 
-$('usrAddBtn').addEventListener('click', async () => {
-  const status = $('usrStatus');
-  const full_name = $('usrName').value.trim();
-  const pin = $('usrPin').value.trim();
+// ---- Two-factor setup, from inside Edit Staff, owner accounts only ----
 
-  if (!full_name || pin.length !== 4) {
-    status.textContent = 'Name and a 4-digit PIN are both required.';
+$('editStaffTwoFaToggle').addEventListener('click', async () => {
+  if (!editingStaffUser) return;
+
+  if (editingStaffUser.totp_enabled) {
+    if (!window.confirm('Turn off two-factor login for this account? They will only need their PIN to sign in after this.')) return;
+    try {
+      await withServerAuth(() => disableTwoFactor(editingStaffId));
+      editingStaffUser.totp_enabled = false;
+      refreshTwoFaSection();
+    } catch (err) {
+      window.alert(`Couldn't turn off two-factor login. ${err.message}`);
+    }
+    return;
+  }
+
+  try {
+    const { secret } = await withServerAuth(() => setupTwoFactor(editingStaffId));
+    openTwoFaModal(secret);
+  } catch (err) {
+    window.alert(`Couldn't start setup. ${err.message}`);
+  }
+});
+
+function formatSecretForDisplay(secret) {
+  return (secret.match(/.{1,4}/g) || [secret]).join(' ');
+}
+
+function openTwoFaModal(secret) {
+  $('twoFaSecretDisplay').textContent = formatSecretForDisplay(secret);
+  $('twoFaConfirmCode').value = '';
+  $('twoFaStatus').textContent = '';
+  $('twoFaStatus').className = 'form-status';
+  $('twoFaOverlay').hidden = false;
+}
+
+$('twoFaCancelBtn').addEventListener('click', () => { $('twoFaOverlay').hidden = true; });
+
+$('twoFaConfirmBtn').addEventListener('click', async () => {
+  const status = $('twoFaStatus');
+  const code = $('twoFaConfirmCode').value.trim();
+
+  if (code.length !== 6) {
+    status.textContent = 'Enter the 6-digit code shown in the authenticator app.';
     status.className = 'form-status err';
     return;
   }
 
   try {
-    await withServerAuth(() => createUser({ full_name, role: $('usrRole').value, pin }));
+    await withServerAuth(() => verifyTwoFactor(editingStaffId, code));
+    status.textContent = 'Turned on.';
+    status.className = 'form-status ok';
+    editingStaffUser.totp_enabled = true;
+    refreshTwoFaSection();
+    setTimeout(() => { $('twoFaOverlay').hidden = true; }, 700);
+  } catch (err) {
+    status.textContent = `Couldn't confirm. ${err.message}`;
+    status.className = 'form-status err';
+  }
+});
+
+// ---- Add staff ----
+
+$('usrAddBtn').addEventListener('click', async () => {
+  const status = $('usrStatus');
+  const full_name = $('usrName').value.trim();
+  const pin = $('usrPin').value.trim();
+  const role = $('usrRole').value;
+  const expectedLen = pinLengthFor(role);
+
+  if (!full_name || pin.length !== expectedLen) {
+    status.textContent = `Name and a ${expectedLen}-digit PIN are both required for this role.`;
+    status.className = 'form-status err';
+    return;
+  }
+
+  try {
+    await withServerAuth(() => createUser({ full_name, role, pin }));
     status.textContent = `Added ${full_name}.`;
     status.className = 'form-status ok';
     $('usrName').value = '';

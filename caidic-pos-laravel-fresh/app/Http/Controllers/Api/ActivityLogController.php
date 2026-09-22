@@ -51,6 +51,7 @@ class ActivityLogController extends Controller
 
         $data['actor_id'] = $request->user()->id;
         $data['terminal_id'] = $request->header('X-Terminal-Id', 'unknown');
+        $data['ip_address'] = $request->ip();
 
         return response()->json(ActivityLog::firstOrCreate(['id' => $data['id']], $data), 201);
     }

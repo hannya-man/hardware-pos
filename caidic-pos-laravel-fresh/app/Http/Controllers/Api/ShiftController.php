@@ -15,6 +15,7 @@ class ShiftController extends Controller
 
         $shifts = ShiftLog::with('cashier:id,full_name')
             ->withSum(['sales as sales_total' => fn ($q) => $q->where('status', 'completed')], 'total_amount')
+            ->when($request->cashier_id, fn ($q, $v) => $q->where('cashier_id', $v))
             ->latest('started_at')
             ->paginate(50);
 

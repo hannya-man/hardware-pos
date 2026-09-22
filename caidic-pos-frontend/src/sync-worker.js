@@ -46,6 +46,12 @@ async function api(path, { method = 'GET', body, mode = 'terminal' } = {}) {
     res = await fetch(`${API_BASE}${path}`, {
       method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal
     });
+  } catch (err) {
+    // A network-level failure (offline, wrong API URL, CORS, DNS, etc.)
+    // never reaches the response handling below — surfaced here with
+    // whatever detail the browser gave, instead of silently becoming an
+    // unreadable generic failure further up.
+    throw new Error(`Could not reach the server (${err.message}). Check the internet connection and that this device's API address is set up correctly.`);
   } finally {
     clearTimeout(timeout);
   }
@@ -132,6 +138,14 @@ export async function completeSale({
     await db.sale_items.bulkAdd(items);
     await db.stock_movements.bulkAdd(movements);
     await enqueue('sale', sale_id, { sale, items, movements });
+  });
+
+  // A completed sale is its own event in Staff Logs, not just the
+  // individual "item added" entries leading up to it — this was
+  // missing before, so a finished sale left no record of itself.
+  await logActivity({
+    actor_id: cashier_id, shift_id, event_type: 'sale_completed',
+    entity_type: 'sale', entity_id: sale_id, details: { total_amount, item_count: cart.length }
   });
 
   return sale_id;
@@ -369,6 +383,19 @@ export async function createUser(payload) {
 
 export async function updateUser(id, payload) {
   return api(`/users/${id}`, { method: 'PATCH', body: payload, mode: 'user' });
+}
+
+// Two-factor login setup for an owner account (Google Authenticator).
+export async function setupTwoFactor(id) {
+  return api(`/users/${id}/2fa/setup`, { method: 'POST', mode: 'user' });
+}
+
+export async function verifyTwoFactor(id, code) {
+  return api(`/users/${id}/2fa/verify`, { method: 'POST', body: { code }, mode: 'user' });
+}
+
+export async function disableTwoFactor(id) {
+  return api(`/users/${id}/2fa/disable`, { method: 'POST', mode: 'user' });
 }
 
 // ---------------------------------------------------------------------------
