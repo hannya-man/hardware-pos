@@ -78,11 +78,24 @@ class SyncController extends Controller
             throw new \InvalidArgumentException("unknown entity_type: {$item['entity_type']}");
         }
 
+        $payload = $item['payload'];
+
+        // The device reporting its own activity isn't a trustworthy
+        // source for what its IP address is, so this is stamped here,
+        // from the actual connection making this sync request, rather
+        // than trusted from whatever the client included in the payload.
+        // This is the real path cashier activity (logins, item adds,
+        // completed sales) reaches the server through — not
+        // ActivityLogController::store() directly.
+        if ($item['entity_type'] === 'activity_log') {
+            $payload['ip_address'] = request()->ip();
+        }
+
         if (array_key_exists($item['entity_type'], self::IMMUTABLE)) {
             // Insert-once: if the id already exists, this retry is a no-op.
-            $model::firstOrCreate(['id' => $item['payload']['id']], $item['payload']);
+            $model::firstOrCreate(['id' => $payload['id']], $payload);
         } else {
-            $model::updateOrCreate(['id' => $item['payload']['id']], $item['payload']);
+            $model::updateOrCreate(['id' => $payload['id']], $payload);
         }
     }
 

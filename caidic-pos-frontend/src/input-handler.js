@@ -42,17 +42,33 @@ export function attachScannerListener(onScan) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. MANUAL SEARCH — unchanged
+// 2. MANUAL SEARCH
+//
+// FIXED: this used to check `p.is_active` as a plain truthy value, which
+// silently excludes any product whose local record doesn't have that
+// field set to exactly `true` (for instance `undefined`, if that record
+// was written to this device before is_active was included in every
+// sync response). The Billing grid was never written that way — it
+// always checked `p.is_active !== false`, meaning "show it unless we
+// were explicitly told it's archived" — so a product could show up on
+// the grid perfectly fine while search for that exact same item turned
+// up nothing. Both now use the same permissive check, and results are
+// sorted by name so they show up in a predictable order instead of
+// whatever order they happened to be stored in.
 // ---------------------------------------------------------------------------
 
 export async function searchProducts(query, limit = 20) {
   const q = query.trim().toLowerCase();
   if (!q) return [];
 
-  return db.products
-    .filter((p) => p.is_active && (p.sku.toLowerCase().includes(q) || p.name.toLowerCase().includes(q)))
-    .limit(limit)
+  const matches = await db.products
+    .filter((p) => p.is_active !== false
+      && ((p.sku ?? '').toLowerCase().includes(q) || (p.name ?? '').toLowerCase().includes(q)))
     .toArray();
+
+  matches.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? ''));
+
+  return matches.slice(0, limit);
 }
 
 export async function getProductByBarcode(barcode) {
@@ -64,12 +80,17 @@ export async function getProductBySku(sku) {
 }
 
 // ---------------------------------------------------------------------------
-// 3. QUICK-SELECT — unchanged
+// 3. QUICK-SELECT
+//
+// FIXED: same `is_active` issue as searchProducts — `!product.is_active`
+// meant a product with a missing (not explicitly false) is_active field
+// would silently refuse to be added to the cart even while showing on
+// the grid, with no error or message, just nothing happening on tap.
 // ---------------------------------------------------------------------------
 
 export async function quickSelect(productId, quantity = 1) {
   const product = await db.products.get(productId);
-  if (!product || !product.is_active) return null;
+  if (!product || product.is_active === false) return null;
 
   return {
     product_id: product.id,

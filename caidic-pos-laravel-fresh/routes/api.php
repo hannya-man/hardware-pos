@@ -16,6 +16,7 @@ use App\Http\Controllers\Api\SalesReturnController;
 use App\Http\Controllers\Api\ShiftController;
 use App\Http\Controllers\Api\SupplierController;
 use App\Http\Controllers\Api\SyncController;
+use App\Http\Controllers\Api\TwoFactorController;
 use App\Http\Controllers\Api\UserController;
 use Illuminate\Support\Facades\Route;
 
@@ -59,6 +60,11 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/users', [UserController::class, 'index']);
     Route::post('/users', [UserController::class, 'store']);
     Route::patch('/users/{id}', [UserController::class, 'update']);
+
+    // Two-factor login for owner accounts (Google Authenticator).
+    Route::post('/users/{id}/2fa/setup', [TwoFactorController::class, 'setup']);
+    Route::post('/users/{id}/2fa/verify', [TwoFactorController::class, 'verify']);
+    Route::post('/users/{id}/2fa/disable', [TwoFactorController::class, 'disable']);
 
     Route::get('/dashboard', [DashboardController::class, 'summary']);
 

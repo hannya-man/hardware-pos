@@ -2,8 +2,8 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\LogsActivity;
 use App\Http\Controllers\Controller;
-use App\Models\ActivityLog;
 use App\Models\Category;
 use App\Models\Product;
 use Illuminate\Http\Request;
@@ -12,6 +12,8 @@ use Illuminate\Support\Str;
 
 class ProductController extends Controller
 {
+    use LogsActivity;
+
     // GET /api/products/{id} — Sanctum-authenticated, owner only. The admin
     // app calls this the moment it opens a product's edit screen, not on
     // catalog sync. This is the one place cost_price is ever transmitted.
@@ -105,28 +107,17 @@ class ProductController extends Controller
             'is_active' => true,
         ]);
 
-        ActivityLog::create([
-            'terminal_id' => $request->header('X-Terminal-Id', 'unknown'),
-            'actor_id' => $request->user()->id,
-            'shift_id' => null,
-            'event_type' => 'item_added_to_catalog',
-            'entity_type' => 'product',
-            'entity_id' => $product->id,
-            'details' => ['product_name' => $product->name, 'sku' => $product->sku],
-            'client_created_at' => now(),
+        $this->recordActivity($request, 'item_added_to_catalog', 'product', $product->id, [
+            'product_name' => $product->name, 'sku' => $product->sku,
         ]);
 
         return response()->json($product, 201);
     }
 
-    // PATCH /api/products/{id} — manager+owner. Now covers the full set
-    // of everyday edits from the Stock List: name, unit, price, low
-    // stock level, and archive/restore. It used to only accept price and
-    // archive/restore. cost_price and sku still aren't editable here on
-    // purpose.
-    //
-    // Every kind of change writes to activity_log, so Staff Logs shows
-    // exactly what changed and who changed it.
+    // PATCH /api/products/{id} — manager+owner. Covers the full set of
+    // everyday edits from the Stock List: name, unit, price, low stock
+    // level, and archive/restore. cost_price and sku still aren't
+    // editable here on purpose.
     public function update(Request $request, string $id)
     {
         Gate::authorize('manage-catalog');
@@ -145,29 +136,19 @@ class ProductController extends Controller
         $product->update($data);
 
         if (array_key_exists('unit_price', $data) && (float) $before['unit_price'] !== (float) $data['unit_price']) {
-            ActivityLog::create([
-                'terminal_id' => $request->header('X-Terminal-Id', 'unknown'),
-                'actor_id' => $request->user()->id,
-                'shift_id' => null,
-                'event_type' => 'price_changed',
-                'entity_type' => 'product',
-                'entity_id' => $product->id,
-                'details' => ['product_name' => $product->name, 'from' => $before['unit_price'], 'to' => $data['unit_price']],
-                'client_created_at' => now(),
+            $this->recordActivity($request, 'price_changed', 'product', $product->id, [
+                'product_name' => $product->name, 'from' => $before['unit_price'], 'to' => $data['unit_price'],
             ]);
         }
 
         if (array_key_exists('is_active', $data) && $before['is_active'] !== $data['is_active']) {
-            ActivityLog::create([
-                'terminal_id' => $request->header('X-Terminal-Id', 'unknown'),
-                'actor_id' => $request->user()->id,
-                'shift_id' => null,
-                'event_type' => $data['is_active'] ? 'item_restored' : 'item_archived',
-                'entity_type' => 'product',
-                'entity_id' => $product->id,
-                'details' => ['product_name' => $product->name],
-                'client_created_at' => now(),
-            ]);
+            $this->recordActivity(
+                $request,
+                $data['is_active'] ? 'item_restored' : 'item_archived',
+                'product',
+                $product->id,
+                ['product_name' => $product->name]
+            );
         }
 
         $otherChanges = collect(['name', 'unit', 'reorder_level'])
@@ -175,15 +156,8 @@ class ProductController extends Controller
             ->values();
 
         if ($otherChanges->isNotEmpty()) {
-            ActivityLog::create([
-                'terminal_id' => $request->header('X-Terminal-Id', 'unknown'),
-                'actor_id' => $request->user()->id,
-                'shift_id' => null,
-                'event_type' => 'item_details_updated',
-                'entity_type' => 'product',
-                'entity_id' => $product->id,
-                'details' => ['product_name' => $product->name, 'changed_fields' => $otherChanges->all()],
-                'client_created_at' => now(),
+            $this->recordActivity($request, 'item_details_updated', 'product', $product->id, [
+                'product_name' => $product->name, 'changed_fields' => $otherChanges->all(),
             ]);
         }
 

@@ -470,7 +470,7 @@ function drawMaterialRequestsTable(requests) {
     ? requests.map((r) => `
         <tr class="${r.status === 'fulfilled' ? 'row-archived' : ''}">
           <td>${fmtTime(r.client_created_at)}</td>
-          <td>${r.requested_by?.full_name ?? '-'}</td>
+          <td>${r.requested_by?.full_name ?? '\u2014'}</td>
           <td>${r.items.map((i) => `${i.name_snapshot} \u00d7${i.quantity_requested}`).join('<br>')}</td>
           <td>${r.notes ?? ''}</td>
           <td>${r.status === 'pending'
@@ -519,10 +519,10 @@ function drawPurchaseOrdersTable(pos) {
     ? pos.map((po) => `
         <tr class="${po.status !== 'pending' ? 'row-archived' : ''}">
           <td>${po.po_number}</td>
-          <td>${po.supplier?.name ?? '-'}</td>
+          <td>${po.supplier?.name ?? '\u2014'}</td>
           <td>${po.items.map((i) => `${i.name_snapshot} \u00d7${i.quantity_ordered}`).join('<br>')}</td>
           <td>${po.status}</td>
-          <td>${po.expected_date ? new Date(po.expected_date).toLocaleDateString('en-PH') : '-'}</td>
+          <td>${po.expected_date ? new Date(po.expected_date).toLocaleDateString('en-PH') : '\u2014'}</td>
           <td>${po.status === 'pending'
             ? `<button type="button" class="btn-secondary" data-receive-po="${po.id}">Mark Received</button>`
             : ''}</td>

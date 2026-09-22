@@ -2,9 +2,10 @@
 // function called here (verifyStaffLogin, searchProducts, completeSale,
 // etc.) is the actual offline-first logic already built, not mock data.
 
-import { db, getTerminalId, isProvisioned, setTerminalKey, getOpenShift } from './local-db.js';
+import { db, getTerminalId, isProvisioned, setTerminalKey, getOpenShift, getSyncMeta, setSyncMeta } from './local-db.js';
 import { verifyStaffLogin, searchProducts, quickSelect, attachScannerListener, getProductByBarcode } from './input-handler.js';
 import { startSyncWorker, pullCatalog, forceFullSync, flushOutbox, completeSale, openShift, logActivity } from './sync-worker.js';
+import { verifyTotp } from './totp.js';
 import {
   setAdminUser, renderActivity, renderShifts, renderVoid, renderReturns,
   renderReconciliation, renderAnalytics, renderStaff, renderArchives
@@ -100,11 +101,32 @@ const NAV_ITEMS = [
   { key: 'archives', label: 'Archives', roles: ['manager', 'owner'], onEnter: renderArchives },
 ];
 
+// One line of plain-language help per screen, shown from the "?" button
+// next to the page title in the header — one consistent spot on every
+// page, instead of scattered across different cards.
+const PAGE_HELP = {
+  dashboard: 'A quick look at how the store is doing: sales, stock on hand, and anything that needs attention.',
+  billing: 'This is the register. Scan a barcode, search, or tap an item to add it to the order, then charge.',
+  materialRequests: 'A pick list is a note to the stockroom asking them to prepare certain items, for example for a big customer order or a delivery. It does not charge the customer.',
+  stock: 'How much of each item is in the store and the warehouse. Add a new item, edit one, or archive an item no longer sold.',
+  reconciliation: 'Compares what the computer counted today against what is counted by hand, to catch mistakes before closing the day.',
+  purchaseOrders: 'Orders placed with a supplier for more stock. Mark one as received once the delivery arrives.',
+  priceList: 'Every item and its current price. Click a price to change it.',
+  returns: 'Accept an item a customer is bringing back. A receipt number or reason is required as proof.',
+  void: 'Cancel a sale that already went through, with a reason.',
+  analytics: 'Which items sell the most (fast movers) and which barely sell (slow movers), over the last 7 days.',
+  salesOrders: 'Every shift worked, what it sold, and any cash differences. Tap a shift to see its sales.',
+  activity: 'Pick a staff account to see everything logged under it: logins, sales, changes made, and when. Download saves just their most recent shift.',
+  staff: 'Add a staff account, or edit an existing one to change their name, role, or PIN. Owners can also turn on two-factor login here.',
+  archives: 'Items and staff that were archived or deactivated. Restore any of them from here.',
+};
+
 let currentUser = null;
 let currentShiftId = null;
 let cart = [];
 let selectedLoginUser = null;
 let pinDraft = '';
+let loginStage = 'pin'; // 'pin' for the normal PIN pad, 'totp' for an owner's second-factor code
 let activeView = 'billing';
 let expandedGroups = new Set();
 
@@ -138,11 +160,34 @@ async function init() {
     await forceFullSync().catch(() => {});
   }
 
+  // Stay logged in across a page refresh. This device remembers who was
+  // last signed in here — not a real network session, just a plain local
+  // note in this browser's own storage — so refreshing the tab, or the
+  // app restarting, doesn't force a PIN re-entry mid-shift. If that
+  // account was deactivated in the meantime, this is caught below and
+  // the person is sent back to the login screen instead.
+  const savedUserId = await getSyncMeta('current_user_id', null);
+  if (savedUserId) {
+    const savedUser = await db.users.get(savedUserId);
+    if (savedUser && savedUser.is_active !== false) {
+      currentUser = savedUser;
+      await enterApp({ logEvent: 'session_resumed' });
+      return;
+    }
+    await setSyncMeta('current_user_id', null);
+  }
+
   await renderStaffGrid();
 }
 
 // ---------------------------------------------------------------------------
 // LOGIN — fully local. verifyStaffLogin() never touches the network.
+// Owner accounts use a 6-digit PIN; cashier and manager accounts use 4.
+// An owner with two-factor login turned on is asked for a 6-digit
+// authenticator code as a second step after the PIN is accepted — that
+// check runs fully offline too, using the same code this device already
+// synced down (see totp.js), no network call needed at the moment of
+// login.
 // ---------------------------------------------------------------------------
 
 async function renderStaffGrid() {
@@ -161,14 +206,20 @@ async function renderStaffGrid() {
   });
 }
 
+function pinLengthFor(user) {
+  return user?.role === 'owner' ? 6 : 4;
+}
+
 function openPinPad(user) {
   selectedLoginUser = user;
   pinDraft = '';
+  loginStage = 'pin';
   $('staffGrid').hidden = true;
   $('pinPad').hidden = false;
   $('pinName').textContent = user.full_name;
   $('pinAv').textContent = initials(user.full_name);
   $('loginError').textContent = '';
+  $('pinPadTitle').hidden = true;
   renderPinDots();
 }
 
@@ -176,10 +227,16 @@ $('pinBack').addEventListener('click', () => {
   $('staffGrid').hidden = false;
   $('pinPad').hidden = true;
   selectedLoginUser = null;
+  loginStage = 'pin';
 });
 
 function renderPinDots() {
-  document.querySelectorAll('.pin-dots span').forEach((dot, i) => dot.classList.toggle('filled', i < pinDraft.length));
+  const targetLength = loginStage === 'totp' ? 6 : pinLengthFor(selectedLoginUser);
+  const container = document.querySelector('.pin-dots');
+  if (container.children.length !== targetLength) {
+    container.innerHTML = Array.from({ length: targetLength }, () => '<span></span>').join('');
+  }
+  container.querySelectorAll('span').forEach((dot, i) => dot.classList.toggle('filled', i < pinDraft.length));
 }
 
 const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'];
@@ -192,31 +249,79 @@ $('keypad').innerHTML = KEYS.map((k) => {
 $('keypad').querySelectorAll('button').forEach((btn) => {
   btn.addEventListener('click', async () => {
     const k = btn.dataset.key;
+    const targetLength = loginStage === 'totp' ? 6 : pinLengthFor(selectedLoginUser);
     if (k === 'clear') pinDraft = '';
     else if (k === 'back') pinDraft = pinDraft.slice(0, -1);
-    else if (pinDraft.length < 4) pinDraft += k;
+    else if (pinDraft.length < targetLength) pinDraft += k;
     renderPinDots();
-    if (pinDraft.length === 4) await attemptLogin();
+    if (pinDraft.length === targetLength) {
+      if (loginStage === 'pin') await attemptLogin();
+      else await attemptTotp();
+    }
   });
 });
 
 async function attemptLogin() {
   const { approved, user } = await verifyStaffLogin(selectedLoginUser.id, pinDraft);
-  if (approved) {
-    currentUser = user;
-    await enterApp();
-  } else {
+
+  if (!approved) {
     $('loginError').textContent = 'Incorrect PIN. Try again.';
     pinDraft = '';
     renderPinDots();
+    return;
   }
+
+  if (user.role === 'owner' && user.totp_enabled) {
+    if (!user.totp_secret) {
+      // Two-factor is on for this account, but this device hasn't
+      // synced the secret needed to check the code — happens if it was
+      // just turned on somewhere else and this terminal hasn't been
+      // online since. Connectivity is required to fix this once; after
+      // that, checking the code works offline like everything else here.
+      $('loginError').textContent = 'Two-factor login has not synced to this device yet. Connect to the internet and try again.';
+      pinDraft = '';
+      renderPinDots();
+      return;
+    }
+
+    loginStage = 'totp';
+    pinDraft = '';
+    $('pinPadTitle').hidden = false;
+    $('pinPadTitle').textContent = 'Enter the 6-digit code from your authenticator app';
+    $('loginError').textContent = '';
+    renderPinDots();
+    return;
+  }
+
+  currentUser = user;
+  await setSyncMeta('current_user_id', user.id);
+  await enterApp({ logEvent: 'login' });
+}
+
+async function attemptTotp() {
+  const ok = await verifyTotp(selectedLoginUser.totp_secret, pinDraft);
+
+  if (!ok) {
+    $('loginError').textContent = 'That code did not match. Try again.';
+    pinDraft = '';
+    renderPinDots();
+    return;
+  }
+
+  currentUser = selectedLoginUser;
+  await setSyncMeta('current_user_id', currentUser.id);
+  await enterApp({ logEvent: 'login' });
 }
 
 // ---------------------------------------------------------------------------
 // APP SHELL
 // ---------------------------------------------------------------------------
 
-async function enterApp() {
+// logEvent controls what (if anything) gets written to Staff Logs for
+// this entry into the app: 'login' for a real PIN/code entry,
+// 'session_resumed' when a page refresh restored an existing session,
+// or omitted entirely when neither applies.
+async function enterApp({ logEvent } = {}) {
   $('loginScreen').hidden = true;
   $('appShell').hidden = false;
   $('sideName').textContent = currentUser.full_name;
@@ -236,7 +341,9 @@ async function enterApp() {
     currentShiftId = await openShift({ cashier_id: currentUser.id, opening_cash });
   }
 
-  await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'login' });
+  if (logEvent) {
+    await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: logEvent });
+  }
 
   renderNav();
   switchView('billing');
@@ -295,7 +402,16 @@ function toggleGroup(key) {
   if (isOpen) expandedGroups.add(key); else expandedGroups.delete(key);
 }
 
+// Every screen change is its own small entry in Staff Logs (event_type
+// 'view_opened') — deliberately at the level of "which screen did they
+// open", not every single click inside it. Logging literally every
+// click and page refresh was asked for, but doing that for real would
+// flood the log with thousands of low-value rows per shift and add a
+// small delay to every tap during actual billing, which is the one
+// place this app cannot afford to slow down. This still answers "what
+// did this person look at and do" without either of those costs.
 function switchView(view) {
+  const isNewView = view !== activeView;
   activeView = view;
   const parent = findParentGroup(view);
   if (parent) expandedGroups.add(parent.key);
@@ -303,14 +419,21 @@ function switchView(view) {
   document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== `view${capitalize(view)}`; });
   const entry = findLeaf(view);
   $('viewTitle').textContent = entry?.label ?? view;
+  $('pageHelpPop').innerHTML = PAGE_HELP[view] ?? '';
+  $('pageHelpWrap').hidden = !PAGE_HELP[view];
   renderNav();
   entry?.onEnter?.();
+
+  if (isNewView && currentUser) {
+    logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'view_opened', entity_type: 'view', details: { view } });
+  }
 }
 
 function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
 
 $('logoutBtn').addEventListener('click', async () => {
   await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'logout' });
+  await setSyncMeta('current_user_id', null);
   currentUser = null;
   cart = [];
   activeView = 'billing';
@@ -455,9 +578,11 @@ $('chargeBtn').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 // MANUAL SYNC — the Sync Now button. Unlike the quiet, incremental pulls
 // that happen automatically, this always starts the catalog copy over
-// from scratch (forceFullSync) and says plainly what happened afterward,
-// so tapping it gives a real answer instead of just spinning silently.
-// Works from the login screen too, before anyone's signed in.
+// from scratch (forceFullSync) and says plainly what happened afterward
+// — including the real error message on failure now, not just a generic
+// "something went wrong", so a problem here is something that can
+// actually be diagnosed instead of only guessed at. Works from the
+// login screen too, before anyone's signed in.
 // ---------------------------------------------------------------------------
 
 async function doManualSync() {
@@ -481,8 +606,8 @@ async function doManualSync() {
     } else {
       await renderStaffGrid();
     }
-  } catch {
-    window.alert('Could not sync right now. Check the internet connection and try again.');
+  } catch (err) {
+    window.alert(`Could not sync. ${err.message || 'Unknown error.'}`);
   } finally {
     buttons.forEach((b) => { b.disabled = false; b.textContent = 'Sync Now'; });
   }
@@ -490,5 +615,13 @@ async function doManualSync() {
 
 $('syncNowBtn')?.addEventListener('click', doManualSync);
 $('syncNowLoginBtn')?.addEventListener('click', doManualSync);
+
+// ---------------------------------------------------------------------------
+// HELP BUBBLE — one "?" next to the page title in the header, its
+// explanation swapped out per screen in switchView() above. Shows on
+// hover/focus (see style.css), no click needed to open or close it. The
+// connection-status help bubble next to Sync Now works the same way
+// automatically, since it uses the same .help-wrap/.help-btn markup.
+// ---------------------------------------------------------------------------
 
 init();

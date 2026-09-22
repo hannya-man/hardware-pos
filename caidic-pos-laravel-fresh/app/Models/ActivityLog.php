@@ -13,7 +13,7 @@ class ActivityLog extends Model
     protected $table = 'activity_log';
 
     protected $fillable = [
-        'terminal_id', 'actor_id', 'shift_id', 'event_type',
+        'terminal_id', 'ip_address', 'actor_id', 'shift_id', 'event_type',
         'entity_type', 'entity_id', 'details', 'client_created_at',
     ];
 
