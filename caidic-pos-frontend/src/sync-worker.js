@@ -27,7 +27,11 @@ class AuthRequiredError extends Error {
 // all). mode: 'user' for the owner-gated endpoints (per-user Sanctum
 // token, fetched just-in-time — see loginWithPin()).
 async function api(path, { method = 'GET', body, mode = 'terminal' } = {}) {
-  const headers = { 'Content-Type': 'application/json', 'X-Terminal-Id': await getTerminalId() };
+  const headers = {
+  'Content-Type': 'application/json',
+  'Accept': 'application/json',
+  'X-Terminal-Id': await getTerminalId()
+};
 
   if (mode === 'terminal') {
     const key = await getTerminalKey();
@@ -61,7 +65,14 @@ async function api(path, { method = 'GET', body, mode = 'terminal' } = {}) {
     throw new AuthRequiredError(mode);
   }
 
-  if (!res.ok) throw new Error(`${method} ${path} failed: ${res.status}`);
+  if (!res.ok) {
+  let detail = '';
+  try {
+    const body = await res.json();
+    if (body.message) detail = `: ${body.message}`;
+  } catch { /* not JSON, ignore */ }
+  throw new Error(`${method} ${path} failed: ${res.status}${detail}`);
+}
   return res.status === 204 ? null : res.json();
 }
 
