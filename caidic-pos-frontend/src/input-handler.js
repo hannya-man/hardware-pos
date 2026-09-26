@@ -86,16 +86,23 @@ export async function getProductBySku(sku) {
 // meant a product with a missing (not explicitly false) is_active field
 // would silently refuse to be added to the cart even while showing on
 // the grid, with no error or message, just nothing happening on tap.
+//
+// UPDATED: also snapshots the product's category name (category_name) so
+// the checkout review popup (see main.js) can show what kind of item
+// each line is, without doing its own extra lookups.
 // ---------------------------------------------------------------------------
 
 export async function quickSelect(productId, quantity = 1) {
   const product = await db.products.get(productId);
   if (!product || product.is_active === false) return null;
 
+  const category = product.category_id ? await db.categories.get(product.category_id) : null;
+
   return {
     product_id: product.id,
     sku_snapshot: product.sku,
     name_snapshot: product.name,
+    category_name: category?.name ?? 'Uncategorized',
     unit_price_snapshot: product.unit_price,
     quantity,
     line_discount: 0,

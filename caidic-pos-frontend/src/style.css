@@ -507,6 +507,31 @@ input:focus-visible {
 .modal-actions button { flex: 1; padding: 12px; border-radius: 6px; font-size: 13px; font-weight: 700; }
 
 /* ===========================================================================
+   CHECKOUT REVIEW — the popup shown when Charge is tapped, before a sale
+   is finalized. Nothing is written to the database while this is open —
+   see openCheckoutReview()/finalizeCheckout() in main.js. Reuses .overlay/
+   .modal/.modal-actions above so it behaves exactly like every other
+   modal in the app (fixed position, sidebar untouched).
+=========================================================================== */
+.checkout-review-lines { max-height: 260px; overflow-y: auto; border: 1px solid var(--rule); border-radius: 8px; padding: 2px 14px; }
+.checkout-review-line { padding: 10px 0; border-bottom: 1px dashed var(--rule); }
+.checkout-review-line:last-child { border-bottom: none; }
+.crl-name { font-size: 13.5px; font-weight: 600; margin-bottom: 4px; }
+.crl-category {
+  display: inline-block; font-family: var(--font-display); font-size: 10px; font-weight: 700;
+  letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-soft);
+  background: var(--surface-warm); border: 1px solid var(--rule);
+  border-radius: 999px; padding: 2px 8px;
+}
+.crl-detail { display: flex; justify-content: space-between; font-family: var(--font-display); font-size: 12px; color: var(--ink-soft); margin-top: 6px; }
+.checkout-change-row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding-top: 10px; margin-top: 4px; border-top: 1px dashed var(--rule);
+  font-family: var(--font-display); font-weight: 700; font-size: 19px; color: var(--safety-orange);
+}
+.checkout-change-row.checkout-change-short { color: var(--danger); }
+
+/* ===========================================================================
    ITEM PICKER ROWS — shared by Material Pick Lists and Supplier Orders.
    Same visual language as the cart's .line remove button.
 =========================================================================== */
