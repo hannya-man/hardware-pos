@@ -129,6 +129,7 @@ let pinDraft = '';
 let loginStage = 'pin'; // 'pin' for the normal PIN pad, 'totp' for an owner's second-factor code
 let activeView = 'billing';
 let expandedGroups = new Set();
+let checkoutTotals = null; // set by openCheckoutReview(), cleared once the checkout popup closes
 
 // ---------------------------------------------------------------------------
 // STARTUP
@@ -548,32 +549,106 @@ attachScannerListener(async (code) => {
   }
 });
 
-$('chargeBtn').addEventListener('click', async () => {
+// ---------------------------------------------------------------------------
+// CHECKOUT REVIEW — tapping Charge opens this popup instead of charging
+// right away. Nothing is written here: completeSale() (which is what
+// actually logs activity, moves stock, and updates sales totals) is only
+// called once the cashier presses Print or Done below. Both buttons
+// finalize the sale the same way; Print also opens the receipt print
+// dialog afterward. Closing/leaving this popup without pressing either
+// one leaves no trace — the cart is untouched and nothing was recorded.
+// ---------------------------------------------------------------------------
+
+function openCheckoutReview() {
+  if (!cart.length) return;
+
   const subtotal = round2(cart.reduce((sum, l) => sum + l.line_total, 0));
   const tax_amount = round2(subtotal * 0.12);
   const total_amount = round2(subtotal + tax_amount);
-  const soldItems = [...cart];
+  checkoutTotals = { subtotal, tax_amount, total_amount };
 
-  const sale_id = await completeSale({
-    cashier_id: currentUser.id,
-    shift_id: currentShiftId,
-    cart,
-    payment_method: 'cash',
-    amount_tendered: total_amount,
-    tax_amount
-  });
+  $('checkoutReviewLines').innerHTML = cart.map((line) => `
+    <div class="checkout-review-line">
+      <div class="crl-name">${line.name_snapshot}</div>
+      <span class="crl-category">${line.category_name ?? 'Uncategorized'}</span>
+      <div class="crl-detail">
+        <span>${line.quantity} \u00d7 ${peso(line.unit_price_snapshot)}</span>
+        <span>${peso(line.line_total)}</span>
+      </div>
+    </div>`).join('');
 
-  printReceipt({
-    saleId: sale_id,
-    cashierName: currentUser.full_name,
-    cart: soldItems,
-    subtotal, taxAmount: tax_amount, totalAmount: total_amount,
-    paymentMethod: 'cash', amountTendered: total_amount, changeAmount: 0
-  });
+  $('checkoutSubtotal').textContent = peso(subtotal);
+  $('checkoutVat').textContent = peso(tax_amount);
+  $('checkoutTotal').textContent = peso(total_amount);
+  $('checkoutCashTendered').value = total_amount.toFixed(2);
 
-  cart = [];
-  renderCart();
-});
+  $('checkoutReviewOverlay').hidden = false;
+  refreshChange();
+  $('checkoutCashTendered').focus();
+  $('checkoutCashTendered').select();
+}
+
+function pesoSigned(n) {
+  return (n < 0 ? '-' : '') + peso(Math.abs(n));
+}
+
+function refreshChange() {
+  if (!checkoutTotals) return;
+  const tendered = Number($('checkoutCashTendered').value) || 0;
+  const change = round2(tendered - checkoutTotals.total_amount);
+  $('checkoutChange').textContent = pesoSigned(change);
+  $('checkoutChange').closest('.checkout-change-row').classList.toggle('checkout-change-short', change < 0);
+}
+
+$('checkoutCashTendered').addEventListener('input', refreshChange);
+
+async function finalizeCheckout({ shouldPrint }) {
+  if (!checkoutTotals) return;
+
+  $('checkoutPrintBtn').disabled = true;
+  $('checkoutDoneBtn').disabled = true;
+
+  try {
+    const tendered = Number($('checkoutCashTendered').value) || checkoutTotals.total_amount;
+    const change_amount = round2(tendered - checkoutTotals.total_amount);
+    const soldItems = [...cart];
+
+    const sale_id = await completeSale({
+      cashier_id: currentUser.id,
+      shift_id: currentShiftId,
+      cart,
+      payment_method: 'cash',
+      amount_tendered: tendered,
+      tax_amount: checkoutTotals.tax_amount
+    });
+
+    if (shouldPrint) {
+      printReceipt({
+        saleId: sale_id,
+        cashierName: currentUser.full_name,
+        cart: soldItems,
+        subtotal: checkoutTotals.subtotal,
+        taxAmount: checkoutTotals.tax_amount,
+        totalAmount: checkoutTotals.total_amount,
+        paymentMethod: 'cash',
+        amountTendered: tendered,
+        changeAmount: Math.max(change_amount, 0)
+      });
+    }
+
+    cart = [];
+    renderCart();
+    $('checkoutReviewOverlay').hidden = true;
+    checkoutTotals = null;
+  } finally {
+    $('checkoutPrintBtn').disabled = false;
+    $('checkoutDoneBtn').disabled = false;
+  }
+}
+
+$('chargeBtn').addEventListener('click', openCheckoutReview);
+$('checkoutPrintBtn').addEventListener('click', () => finalizeCheckout({ shouldPrint: true }));
+$('checkoutDoneBtn').addEventListener('click', () => finalizeCheckout({ shouldPrint: false }));
 
 // ---------------------------------------------------------------------------
 // MANUAL SYNC — the Sync Now button. Unlike the quiet, incremental pulls

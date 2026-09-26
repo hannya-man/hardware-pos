@@ -573,6 +573,36 @@
   </div>
 </div>
 
+<!-- Checkout Review — shown when Charge is tapped. Nothing is recorded
+     yet: no activity log entry, no stock movement, sales totals stay
+     unchanged. Print or Done both finalize the sale; Print also opens
+     the print dialog afterward. Uses the same fixed .overlay as every
+     other modal on this page, so the sidebar never shifts while it's
+     open. -->
+<div id="checkoutReviewOverlay" class="overlay" hidden>
+  <div class="modal modal-wide">
+    <h3>Review Order</h3>
+    <div id="checkoutReviewLines" class="checkout-review-lines"></div>
+    <div class="totals">
+      <div class="row"><span>Subtotal</span><span id="checkoutSubtotal">&#8369;0.00</span></div>
+      <div class="row"><span>VAT (12%)</span><span id="checkoutVat">&#8369;0.00</span></div>
+      <div class="row grand"><span>Total</span><span id="checkoutTotal">&#8369;0.00</span></div>
+    </div>
+    <div class="form-row" style="margin-top:14px;">
+      <label>Cash Tendered</label>
+      <input id="checkoutCashTendered" type="number" min="0" step="0.01" inputmode="decimal">
+    </div>
+    <div class="checkout-change-row">
+      <span>Change</span>
+      <span id="checkoutChange">&#8369;0.00</span>
+    </div>
+    <div class="modal-actions" style="margin-top:18px;">
+      <button type="button" id="checkoutPrintBtn" class="btn-secondary">Print</button>
+      <button type="button" id="checkoutDoneBtn" class="btn-primary">Done</button>
+    </div>
+  </div>
+</div>
+
 <!-- Receipt — hidden on screen, only ever shown via @media print when
      body.printing-receipt is set (see receipt.js). Everything else on the
      page is hidden for the duration of that print job. -->
