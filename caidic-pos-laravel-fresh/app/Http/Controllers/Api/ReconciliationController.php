@@ -20,12 +20,12 @@ class ReconciliationController extends Controller
     {
         $date = $request->query('date', now()->toDateString());
 
-        // 'sale' deltas are negative, 'void' deltas are the positive
+        // 'sale' deltas are negative, 'void_restock' deltas are the positive
         // offset created when that sale is later voided (see
         // SalesController::void()). Summing -delta across both reasons
         // nets a voided sale back to zero instead of still counting it
         // as stock that "went out" for the day.
-        $out = StockMovement::whereIn('reason', ['sale', 'void'])
+        $out = StockMovement::whereIn('reason', ['sale', 'void_restock'])
             ->whereDate('client_created_at', $date)
             ->sum(DB::raw('-delta'));
 

@@ -1,818 +1,518 @@
-// admin.js — the "admin can access everything" screens. Nothing in here
-// enforces access on its own; every call these functions make hits an
-// endpoint that runs its own Gate::authorize() server-side (see the
-// Laravel routes/api.php). The nav filtering in main.js only decides what
-// a person SEES, not what they're allowed to do — a cashier who somehow
-// reached this screen would just get a 401/403 back from every call.
+// admin.js — Sales (voids themselves are in voids.js), Shifts (with each
+// shift's timeline), Returns, and Staff. Hiding a screen in the menu is only
+// a convenience: every call here hits a server function that checks the role
+// itself.
 
-import { db } from './local-db.js';
-import { searchProducts } from './input-handler.js';
+import QRCode from 'qrcode';
 import {
-  loginWithPin,
-  fetchActivityLog, fetchShifts, fetchSales, voidSaleAsAdmin,
-  submitReturn, fetchTodayReconciliation, submitReconciliation,
-  fetchMovers, submitCycleCount,
-  fetchUsers, createUser, updateUser,
-  setupTwoFactor, verifyTwoFactor, disableTwoFactor,
-  fetchStock, updateProduct
+  flushOutbox, fetchSales, fetchShifts, fetchShift, submitReturn,
+  fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor,
 } from './sync-worker.js';
+import { withServerAuth } from './session.js';
+import { askToVoid, openVoidRequest } from './voids.js';
+import {
+  $, esc, peso, qty, fmtTime, fmtDate, humanize, badge, avatar, setStatus, showSelected, countTo,
+  tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast,
+} from './ui.js';
 
-const $ = (id) => document.getElementById(id);
-const peso = (n) => '\u20b1' + Number(n).toFixed(2);
-export const fmtTime = (iso) => new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-const NO_MATCH_NOTE = '<p class="placeholder-note" style="padding:6px 2px;">No matches. Try Sync Now if this item should be here.</p>';
+const PAY_LABELS = { cash: 'Cash', gcash: 'GCash / PayMaya', bank: 'Bank transfer', credit: 'Credit', card: 'Card', other: 'Other' };
+const rowsOf = (result) => result.data ?? result; // paginated or plain
 const pinLengthFor = (role) => (role === 'owner' ? 6 : 4);
+const personCell = (u) => (u ? `<div class="person">${avatar(u)}<span class="cell-main">${esc(u.full_name)}</span></div>` : '—');
+const clock = (iso) => new Date(iso).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' });
+const signed = (n) => `${n > 0 ? '+' : n < 0 ? '−' : ''}${peso(Math.abs(n))}`;
 
-let adminUser = null;
-export function setAdminUser(user) { adminUser = user; }
+const paymentLabel = (s) => (s.payment_method === 'credit' ? `Credit · ${s.customer?.name ?? 'customer'}` : PAY_LABELS[s.payment_method] ?? humanize(s.payment_method));
 
-// ---------------------------------------------------------------------------
-// SERVER-AUTH HELPER — every owner-gated call goes through this. If the
-// Sanctum token is missing or was rejected, it prompts a PIN, exchanges it
-// for a fresh token via loginWithPin(), then retries the original call
-// exactly once. This is the one place a "confirm your PIN" popup should
-// ever appear for these screens — callers below never handle auth directly.
-// Exported so dashboard.js and inventory.js can reuse it instead of each
-// building their own PIN-retry modal.
-// ---------------------------------------------------------------------------
-
-function promptForServerPin() {
-  return new Promise((resolve, reject) => {
-    const overlay = $('pinConfirmOverlay');
-    const input = $('pinConfirmInput');
-    const error = $('pinConfirmError');
-
-    input.value = '';
-    error.hidden = true;
-    overlay.hidden = false;
-    input.focus();
-
-    const cleanup = () => {
-      overlay.hidden = true;
-      $('pinConfirmSubmit').removeEventListener('click', onSubmit);
-      $('pinConfirmCancel').removeEventListener('click', onCancel);
-      input.removeEventListener('keydown', onKeydown);
-    };
-
-    async function onSubmit() {
-      try {
-        await loginWithPin(adminUser.id, input.value);
-        cleanup();
-        resolve();
-      } catch {
-        error.textContent = "That didn't work. Wrong PIN, or no connection right now.";
-        error.hidden = false;
-        input.value = '';
-        input.focus();
-      }
-    }
-
-    function onCancel() {
-      cleanup();
-      reject(new Error('PIN confirmation cancelled'));
-    }
-
-    function onKeydown(e) {
-      if (e.key === 'Enter') onSubmit();
-    }
-
-    $('pinConfirmSubmit').addEventListener('click', onSubmit);
-    $('pinConfirmCancel').addEventListener('click', onCancel);
-    input.addEventListener('keydown', onKeydown);
-  });
+function itemsSummary(items = [], shown = 2) {
+  const text = items.slice(0, shown).map((i) => `${i.name_snapshot} × ${qty(i.quantity)}`).join(', ');
+  return esc(text) + (items.length > shown ? ` <span class="muted">+${items.length - shown} more</span>` : '');
 }
 
-export async function withServerAuth(fn) {
+function duration(from, to) {
+  const minutes = Math.max(0, Math.round(((to ? new Date(to) : new Date()) - new Date(from)) / 60000));
+  return `${Math.floor(minutes / 60)}h ${String(minutes % 60).padStart(2, '0')}m`;
+}
+
+// Start of today / this week (Monday) / this month, on this device's clock.
+function periodStart(period) {
+  const start = new Date();
+  start.setHours(0, 0, 0, 0);
+  if (period === 'week') start.setDate(start.getDate() - ((start.getDay() + 6) % 7));
+  if (period === 'month') start.setDate(1);
+  return start.toISOString();
+}
+
+// ---------------------------------------------------------------------------
+// SALES
+// ---------------------------------------------------------------------------
+
+let salesPeriod = 'today';
+let sales = [];
+let openSaleRow = null;
+
+export async function renderSales() {
+  $('salesPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === salesPeriod));
+  tableMessage('salesTable', 'Loading…');
+  await flushOutbox().catch(() => {}); // include sales made on this device moments ago
   try {
-    return await fn();
+    const result = await withServerAuth(() => fetchSales({ from: periodStart(salesPeriod) }));
+    sales = rowsOf(result);
+    const totals = result.totals ?? {};
+    const sum = (...methods) => methods.reduce((t, m) => t + Number(totals[m] ?? 0), 0);
+    countTo($('salesTotal'), Object.values(totals).reduce((t, v) => t + Number(v), 0));
+    countTo($('salesCash'), sum('cash'));
+    countTo($('salesDigital'), sum('gcash', 'bank', 'card', 'other'));
+    countTo($('salesCredit'), sum('credit'));
+
+    renderRows('salesTable', sales, (s) => `
+      <tr class="is-clickable${s.status === 'completed' ? '' : ' is-muted'}" data-action="open" data-id="${esc(s.id)}">
+        <td class="nowrap">${fmtTime(s.client_created_at)}</td>
+        <td>${itemsSummary(s.items)}</td>
+        <td>${esc(paymentLabel(s))}</td>
+        <td>${esc(s.cashier?.full_name ?? '—')}</td>
+        <td class="num"><strong>${peso(s.total_amount)}</strong>${s.status !== 'completed'
+          ? `<span class="cell-sub">${badge(humanize(s.status), 'bad')}</span>`
+          : s.pending_void ? `<span class="cell-sub">${badge('Void waiting', 'warn')}</span>` : ''}</td>
+      </tr>`, 'No sales in this period yet.');
   } catch (err) {
-    if (err.name !== 'AuthRequiredError' || err.kind !== 'user') throw err;
-    await promptForServerPin(); // throws if cancelled, which correctly aborts the caller too
-    return await fn();
+    tableMessage('salesTable', `Couldn't load. ${err.message}`);
   }
 }
 
-// ---------------------------------------------------------------------------
-// STAFF LOGS — owner only. Redesigned around accounts instead of a flat
-// filtered table: one row per staff member, a View button that opens
-// that person's own activity (when they clocked in and out, and
-// everything logged in between, with the IP address it came from), and
-// a Download button that saves just their most recent shift as a CSV
-// file, not their whole history. Nothing here is editable — this screen
-// only ever reads and exports, the same as the reference layout this
-// was modeled on.
-// ---------------------------------------------------------------------------
+$('salesPeriod').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-period]');
+  if (!btn) return;
+  salesPeriod = btn.dataset.period;
+  renderSales();
+});
 
-let logAccounts = [];
-let currentLogAccount = null;
+onAction('salesTable', { open: (id) => openSale(sales.find((s) => s.id === id)) });
 
-export async function renderActivity() {
-  $('staffLogsDetailCard').hidden = true;
-  $('staffLogsListCard').hidden = false;
-
-  const tbody = $('staffLogsAccountsTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
-
-  try {
-    logAccounts = await withServerAuth(() => fetchUsers());
-    tbody.innerHTML = logAccounts.length
-      ? logAccounts.map((u) => `
-          <tr>
-            <td>${u.full_name}</td>
-            <td>${u.role}</td>
-            <td>
-              <button type="button" class="btn-secondary" data-view-account="${u.id}">View</button>
-              <button type="button" class="btn-secondary" data-download-account="${u.id}">Download</button>
-            </td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="3">No staff accounts yet.</td></tr>';
-
-    tbody.querySelectorAll('[data-view-account]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const user = logAccounts.find((u) => u.id === btn.dataset.viewAccount);
-        if (user) openAccountLog(user);
-      });
-    });
-    tbody.querySelectorAll('[data-download-account]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const user = logAccounts.find((u) => u.id === btn.dataset.downloadAccount);
-        if (user) await downloadLastShift(btn, user);
-      });
-    });
-  } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
+function openSale(sale) {
+  if (!sale) return;
+  openSaleRow = sale;
+  const facts = [
+    ['Time', fmtTime(sale.client_created_at)],
+    ['Staff', sale.cashier?.full_name ?? '—'],
+    ['Payment', paymentLabel(sale)],
+  ];
+  if (sale.payment_method === 'cash' && sale.amount_tendered != null) {
+    facts.push(['Cash received', peso(sale.amount_tendered)], ['Change', peso(sale.change_amount ?? 0)]);
   }
-}
-
-async function openAccountLog(user) {
-  currentLogAccount = user;
-  $('staffLogsListCard').hidden = true;
-  $('staffLogsDetailCard').hidden = false;
-  $('staffLogsDetailTitle').textContent = user.full_name;
-
-  const shiftsBody = $('staffLogsShiftsTable').querySelector('tbody');
-  shiftsBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
-  const activityBody = $('staffLogsActivityTable').querySelector('tbody');
-  activityBody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
-
-  try {
-    const shiftResult = await withServerAuth(() => fetchShifts({ cashier_id: user.id }));
-    const shifts = (shiftResult.data ?? shiftResult).slice(0, 10);
-    shiftsBody.innerHTML = shifts.length
-      ? shifts.map((s) => `
-          <tr>
-            <td>${fmtTime(s.started_at)}</td>
-            <td>${s.ended_at ? fmtTime(s.ended_at) : 'Still open'}</td>
-            <td>${s.status}</td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="3">No shifts yet.</td></tr>';
-  } catch (err) {
-    shiftsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
+  if (sale.payment_reference) facts.push(['Reference', sale.payment_reference]);
+  if (sale.payment_method === 'credit') {
+    facts.push(['Paid now', peso(sale.amount_paid ?? 0)], ['Added to credit', peso(Number(sale.total_amount) - Number(sale.amount_paid ?? 0))]);
   }
+  if (sale.status !== 'completed') facts.push(['Status', `${humanize(sale.status)}${sale.void_reason ? `: ${sale.void_reason}` : ''}`]);
 
-  try {
-    const result = await withServerAuth(() => fetchActivityLog({ actor_id: user.id }));
-    const rows = result.data ?? result;
-    activityBody.innerHTML = rows.length
-      ? rows.map((r) => `
-          <tr>
-            <td>${fmtTime(r.client_created_at)}</td>
-            <td>${r.event_type.replace(/_/g, ' ')}</td>
-            <td>${r.entity_type ?? ''}</td>
-            <td>${r.ip_address ?? '\u2014'}</td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="4">No activity recorded yet.</td></tr>';
-  } catch (err) {
-    activityBody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
-  }
+  $('saleTitle').textContent = `Sale of ${peso(sale.total_amount)}`;
+  $('saleFacts').innerHTML = facts.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join('');
+  $('saleLines').innerHTML = (sale.items ?? []).map((i) => `
+    <div class="summary-line">
+      <div><span class="summary-name">${esc(i.name_snapshot)}</span><span class="summary-sub">${qty(i.quantity)} × ${peso(i.unit_price_snapshot)}</span></div>
+      <span class="summary-amt">${peso(i.line_total)}</span>
+    </div>`).join('');
+  $('saleTotal').textContent = peso(sale.total_amount);
+  $('saleVoidBtn').hidden = sale.status !== 'completed' || !!sale.pending_void;
+  $('saleVoidRequestBtn').hidden = sale.status !== 'completed' || !sale.pending_void;
+  openModal('saleOverlay');
 }
 
-$('staffLogsBackBtn').addEventListener('click', renderActivity);
+// Asking only starts it: a second owner has to agree (voids.js).
+$('saleVoidBtn').addEventListener('click', async () => {
+  if (await askToVoid(openSaleRow)) closeModal('saleOverlay');
+});
 
-// Saves just the most recent shift's activity as a CSV file — not the
-// account's whole history — matching "download" being a quick recent
-// check, not a full export.
-async function downloadLastShift(button, user) {
-  const originalLabel = button.textContent;
-  button.disabled = true;
-  button.textContent = 'Preparing...';
+$('saleVoidRequestBtn').addEventListener('click', () => {
+  closeModal('saleOverlay');
+  openVoidRequest(openSaleRow.pending_void.id);
+});
 
-  try {
-    const shiftResult = await withServerAuth(() => fetchShifts({ cashier_id: user.id }));
-    const shifts = shiftResult.data ?? shiftResult;
-
-    if (!shifts.length) {
-      window.alert(`${user.full_name} has no shifts yet.`);
-      return;
-    }
-
-    const lastShift = shifts[0]; // already sorted newest first by the server
-    const activityResult = await withServerAuth(() => fetchActivityLog({ shift_id: lastShift.id }));
-    const rows = activityResult.data ?? activityResult;
-
-    const header = ['Date & Time', 'Activity', 'Entity', 'IP Address'];
-    const lines = [header.map(csvCell).join(',')];
-    rows.forEach((r) => {
-      lines.push([
-        fmtTime(r.client_created_at),
-        r.event_type.replace(/_/g, ' '),
-        r.entity_type ?? '',
-        r.ip_address ?? '',
-      ].map(csvCell).join(','));
-    });
-
-    downloadTextFile(`${slugify(user.full_name)}-last-shift.csv`, lines.join('\r\n'));
-  } catch (err) {
-    window.alert(`Couldn't prepare the download. ${err.message}`);
-  } finally {
-    button.disabled = false;
-    button.textContent = originalLabel;
-  }
-}
-
-function csvCell(value) {
-  return `"${String(value ?? '').replace(/"/g, '""')}"`;
-}
-
-function slugify(name) {
-  return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '') || 'staff';
-}
-
-function downloadTextFile(filename, content) {
-  const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' });
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url;
-  link.download = filename;
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  URL.revokeObjectURL(url);
-}
+// A void was asked for, answered, or lapsed (here or on another device).
+window.addEventListener('voids-changed', () => {
+  if (!$('viewSales').hidden) renderSales();
+});
 
 // ---------------------------------------------------------------------------
-// SHIFTS — "how much did this shift make", and admin void. manager+owner.
+// SHIFTS: clock-in to clock-out, and a timeline of everything in between.
 // ---------------------------------------------------------------------------
+
+let shifts = [];
+let shiftData = null;
+
+const STEP_EVENTS = new Set(['item_added', 'barcode_scanned', 'view_opened']); // only with "Show every step"
+const SHOWN_FROM_RECORDS = new Set(['shift_started', 'shift_ended', 'sale_completed', 'credit_payment_received']);
+const SCREEN_NAMES = { dashboard: 'Dashboard', billing: 'Sell', credit: 'Credit', materialRequests: 'Pick lists', stock: 'Stock', sales: 'Sales', shifts: 'Shifts', returns: 'Returns', staff: 'Staff' };
+
+const EVENT_TEXT = {
+  login: () => 'Signed back in',
+  session_resumed: () => 'Reopened the POS',
+  screen_locked: () => 'Took a break',
+  logout: () => 'Signed out',
+  view_opened: (d) => `Opened ${SCREEN_NAMES[d.view] ?? 'a screen'}`,
+  item_added: (d) => `Added ${d.name ?? 'an item'} to the order`,
+  barcode_scanned: (d) => `Scanned ${d.name ?? 'an item'}`,
+  barcode_no_match: (d) => `Scanned an unknown barcode (${d.code ?? ''})`,
+  material_request_sent: (d) => `Sent a pick list (${d.item_count ?? ''} items)`,
+  pick_list_done: (d) => `Marked a pick list as picked up${d.sale_ref ? ` (sale ${d.sale_ref})` : ''}`,
+  pick_slip_printed: (d) => `Printed a pick slip${d.sale_ref ? ` for sale ${d.sale_ref}` : ''} (${d.item_count ?? ''} items)`,
+  customer_added: (d) => `Added credit customer ${d.name ?? ''}`,
+  customer_updated: (d) => `Updated customer ${d.name ?? ''}`,
+  stock_received: (d) => `Added a delivery: ${qty(d.quantity)} × ${d.name ?? 'item'} to the ${d.location ?? 'store'}`,
+  price_changed: (d) => `Changed the price of ${d.product_name} from ${peso(d.from)} to ${peso(d.to)}`,
+  item_added_to_catalog: (d) => `Added a new item: ${d.product_name}`,
+  item_details_updated: (d) => `Edited ${d.product_name}`,
+  item_archived: (d) => `Archived ${d.product_name}`,
+  item_restored: (d) => `Restored ${d.product_name}`,
+  stock_quantity_adjusted: (d) => `Changed the ${d.location} count of ${d.product_name} by ${d.delta > 0 ? '+' : ''}${qty(d.delta)}`,
+  void_requested: (d) => `Asked to void a ${peso(d.total_amount)} sale: “${d.reason ?? ''}”`,
+  void_approved: (d) => `Approved voiding a ${peso(d.total_amount)} sale`,
+  void_rejected: (d) => `Said no to voiding a ${peso(d.total_amount)} sale`,
+  void_cancelled: (d) => `Cancelled the request to void a ${peso(d.total_amount)} sale`,
+  sale_voided: (d) => `Voided a ${peso(d.total_amount)} sale${d.approved_by ? ` (approved by ${d.approved_by})` : ''}: “${d.reason ?? ''}”`,
+  return_accepted: (d) => `Accepted a return: ${qty(d.quantity)} × ${d.product_name ?? 'item'} (${d.condition ?? ''})`,
+  staff_added: (d) => `Added staff account ${d.staff_name}`,
+  staff_updated: (d) => `Edited staff account ${d.staff_name}`,
+  staff_deactivated: (d) => `Deactivated ${d.staff_name}`,
+  staff_reactivated: (d) => `Restored ${d.staff_name}`,
+  two_factor_enabled: (d) => `Turned on two-factor login for ${d.staff_name}`,
+  two_factor_disabled: (d) => `Turned off two-factor login for ${d.staff_name}`,
+};
+const describe = (a) => EVENT_TEXT[a.event_type]?.(a.details ?? {}) ?? humanize(a.event_type);
 
 export async function renderShifts() {
-  $('shiftDetailCard').hidden = true;
+  $('shiftDetail').hidden = true;
   $('shiftsListCard').hidden = false;
-
-  const tbody = $('shiftsTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="6">Loading...</td></tr>';
-
+  await fillStaffFilter();
+  tableMessage('shiftsTable', 'Loading…');
+  await flushOutbox().catch(() => {});
   try {
-    const result = await withServerAuth(() => fetchShifts());
-    const shifts = result.data ?? result;
-
-    tbody.innerHTML = shifts.length
-      ? shifts.map((s) => `
-          <tr class="clickable-row" data-shift="${s.id}">
-            <td>${fmtTime(s.started_at)}</td>
-            <td>${s.cashier?.full_name ?? '\u2014'}</td>
-            <td>${s.status}</td>
-            <td class="amt-cell">${peso(s.opening_cash)}</td>
-            <td class="amt-cell">${peso(s.sales_total ?? 0)}</td>
-            <td>${s.cash_discrepancy != null ? peso(s.cash_discrepancy) : '\u2014'}</td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="6">No shifts yet.</td></tr>';
-
-    tbody.querySelectorAll('[data-shift]').forEach((row) => {
-      row.addEventListener('click', () => renderShiftDetail(row.dataset.shift, shifts.find((s) => s.id === row.dataset.shift)));
-    });
+    shifts = rowsOf(await withServerAuth(() => fetchShifts({ cashier_id: $('shiftStaffFilter').value })));
+    renderRows('shiftsTable', shifts, (s) => {
+      const diff = s.cash_discrepancy == null ? null : Number(s.cash_discrepancy);
+      return `
+        <tr class="is-clickable" data-action="open" data-id="${esc(s.id)}">
+          <td>${personCell(s.cashier)}</td>
+          <td class="nowrap">${fmtTime(s.started_at)}</td>
+          <td class="nowrap">${s.ended_at ? fmtTime(s.ended_at) : '—'}</td>
+          <td class="num">${duration(s.started_at, s.ended_at)}</td>
+          <td class="num">${peso(s.sales_total ?? 0)}<span class="cell-sub">${s.sales_count} sale${s.sales_count === 1 ? '' : 's'}</span></td>
+          <td class="num${diff ? ' text-bad' : ''}">${diff == null ? '—' : diff === 0 ? 'None' : signed(diff)}</td>
+          <td>${s.status === 'open' ? badge('On shift', 'info') : badge('Ended')}</td>
+        </tr>`;
+    }, 'No shifts yet.');
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="6">Couldn't load. ${err.message}</td></tr>`;
+    tableMessage('shiftsTable', `Couldn't load. ${err.message}`);
   }
 }
 
-async function renderShiftDetail(shiftId, shiftRow) {
+async function fillStaffFilter() {
+  const select = $('shiftStaffFilter');
+  if (select.options.length) return;
+  const staff = await withServerAuth(() => fetchUsers(true)).catch(() => []);
+  select.innerHTML = '<option value="">All staff</option>' + staff.map((u) => `<option value="${esc(u.id)}">${esc(u.full_name)}</option>`).join('');
+}
+
+$('shiftStaffFilter').addEventListener('change', renderShifts);
+$('shiftBackBtn').addEventListener('click', renderShifts);
+$('shiftShowSteps').addEventListener('change', () => shiftData && drawTimeline());
+onAction('shiftsTable', { open: (id) => openShiftDetail(id) });
+
+async function openShiftDetail(id) {
+  try {
+    shiftData = await withServerAuth(() => fetchShift(id));
+  } catch (err) {
+    return toast(`Couldn't open the shift. ${err.message}`, 'error');
+  }
+  const { shift, sales: shiftSales, payments } = shiftData;
+  const done = shiftSales.filter((s) => s.status === 'completed');
+  const credit = done.filter((s) => s.payment_method === 'credit').reduce((t, s) => t + Number(s.total_amount) - Number(s.amount_paid ?? 0), 0);
+  const received = payments.reduce((t, p) => t + Number(p.amount), 0);
+  const diff = shift.cash_discrepancy == null ? null : Number(shift.cash_discrepancy);
+
   $('shiftsListCard').hidden = true;
-  $('shiftDetailCard').hidden = false;
-  $('shiftDetailTitle').textContent = `Sales for ${shiftRow?.cashier?.full_name ?? 'shift'}, ${fmtTime(shiftRow?.started_at)}`;
+  $('shiftDetail').hidden = false;
+  $('shiftTitle').textContent = `${shift.cashier?.full_name ?? 'Shift'} · ${fmtDate(shift.started_at)}`;
+  const stat = (label, value, sub = '', tone = '') => `<div class="stat"><span class="stat-label">${label}</span><span class="stat-value ${tone}">${value}</span><span class="stat-sub">${sub}</span></div>`;
+  $('shiftStats').innerHTML = [
+    stat('Sales', peso(done.reduce((t, s) => t + Number(s.total_amount), 0)), `${done.length} sale${done.length === 1 ? '' : 's'}`),
+    stat('Given on credit', peso(credit), 'to be paid later'),
+    stat('Credit payments taken', peso(received), `${payments.length} payment${payments.length === 1 ? '' : 's'}`),
+    shift.status === 'open'
+      ? stat('Cash count', 'Not yet', `on shift for ${duration(shift.started_at)}`)
+      : stat('Cash difference', diff == null ? '—' : diff === 0 ? 'None' : signed(diff),
+        shift.counted_cash == null ? 'no cash to count' : `counted ${peso(shift.counted_cash)} of ${peso(shift.expected_cash)}`, diff ? 'text-bad' : 'text-ok'),
+  ].join('');
+  drawTimeline();
+  $('content').scrollTop = 0;
+}
 
-  const tbody = $('shiftSalesTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Loading...</td></tr>';
-
-  const result = await withServerAuth(() => fetchSales({ shift_id: shiftId }));
-  const sales = result.data ?? result;
-
-  const draw = () => {
-    tbody.innerHTML = sales.length
-      ? sales.map((s) => `
-          <tr>
-            <td>${fmtTime(s.client_created_at)}</td>
-            <td class="amt-cell">${peso(s.total_amount)}</td>
-            <td>${s.payment_method}</td>
-            <td>${s.status}</td>
-            <td>${s.status === 'completed' ? `<button type="button" class="btn-void" data-void="${s.id}">Void</button>` : ''}</td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="5">No sales on this shift.</td></tr>';
-
-    tbody.querySelectorAll('[data-void]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        const reason = window.prompt('Reason for voiding this sale:');
-        if (!reason) return;
-        await withServerAuth(() => voidSaleAsAdmin(btn.dataset.void, reason));
-        renderShiftDetail(shiftId, shiftRow);
-      });
+function timelineEntries() {
+  const { shift, sales: shiftSales, payments, activity } = shiftData;
+  const showSteps = $('shiftShowSteps').checked;
+  const entries = [
+    { at: shift.started_at, kind: 'start', title: 'Clocked in', sub: `Cash in the drawer: ${peso(shift.opening_cash)}` },
+    ...shiftSales.map((s) => ({
+      at: s.client_created_at,
+      kind: s.status === 'completed' ? 'sale' : 'void',
+      title: `${s.status === 'completed' ? 'Sale' : 'Sale (voided)'} · ${peso(s.total_amount)} · ${paymentLabel(s)}`,
+      sub: (s.items ?? []).map((i) => `${i.name_snapshot} × ${qty(i.quantity)}`).join(', '),
+    })),
+    ...payments.map((p) => ({
+      at: p.client_created_at, kind: 'payment',
+      title: `Credit payment · ${peso(p.amount)} from ${p.customer?.name ?? 'a customer'}`,
+      sub: PAY_LABELS[p.payment_method] ?? p.payment_method,
+    })),
+    ...activity
+      .filter((a) => !SHOWN_FROM_RECORDS.has(a.event_type) && (showSteps || !STEP_EVENTS.has(a.event_type)))
+      .map((a) => ({ at: a.client_created_at, kind: STEP_EVENTS.has(a.event_type) ? 'step' : 'event', title: describe(a), sub: a.ip_address ? `from ${a.ip_address}` : '' })),
+  ];
+  if (shift.ended_at) {
+    entries.push({
+      at: shift.ended_at, kind: 'end', title: 'Clocked out',
+      sub: shift.counted_cash == null ? 'No cash to count' : `Counted ${peso(shift.counted_cash)}, expected ${peso(shift.expected_cash)}`,
     });
-  };
-
-  draw();
-}
-
-$('backToShifts').addEventListener('click', renderShifts);
-
-// ---------------------------------------------------------------------------
-// VOID — a focused list of completed sales, separate from browsing shift
-// by shift. Same voidSaleAsAdmin() call the Shift detail view already
-// used; this just surfaces it as its own screen per the new sidebar.
-// manager+owner.
-// ---------------------------------------------------------------------------
-
-export async function renderVoid() {
-  await loadVoidableSales();
-}
-
-async function loadVoidableSales() {
-  const tbody = $('voidTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="5">Loading...</td></tr>';
-  try {
-    const result = await withServerAuth(() => fetchSales({ status: 'completed' }));
-    const sales = result.data ?? result;
-    drawVoidTable(sales);
-  } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load. ${err.message}</td></tr>`;
   }
+  return entries.sort((a, b) => new Date(a.at) - new Date(b.at));
 }
 
-function drawVoidTable(sales) {
-  const tbody = $('voidTable').querySelector('tbody');
-  tbody.innerHTML = sales.length
-    ? sales.map((s) => `
-        <tr>
-          <td>${fmtTime(s.client_created_at)}</td>
-          <td>${s.cashier?.full_name ?? '\u2014'}</td>
-          <td class="amt-cell">${peso(s.total_amount)}</td>
-          <td>${s.payment_method}</td>
-          <td><button type="button" class="btn-void" data-void="${s.id}">Void</button></td>
-        </tr>`).join('')
-    : '<tr class="empty-row"><td colspan="5">Nothing to void right now.</td></tr>';
-
-  tbody.querySelectorAll('[data-void]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const reason = window.prompt('Reason for voiding this sale:');
-      if (!reason) return;
-      await withServerAuth(() => voidSaleAsAdmin(btn.dataset.void, reason));
-      loadVoidableSales();
-    });
-  });
+function drawTimeline() {
+  $('shiftTimeline').innerHTML = timelineEntries().map((e) => `
+    <li class="tl tl-${e.kind}">
+      <time>${clock(e.at)}</time>
+      <div><strong>${esc(e.title)}</strong>${e.sub ? `<span>${esc(e.sub)}</span>` : ''}</div>
+    </li>`).join('');
 }
 
+const csvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+
+$('shiftDownloadBtn').addEventListener('click', () => {
+  const lines = [['Time', 'What happened', 'Details'], ...timelineEntries().map((e) => [fmtTime(e.at), e.title, e.sub])]
+    .map((cells) => cells.map(csvCell).join(','));
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' }));
+  const who = (shiftData.shift.cashier?.full_name ?? 'shift').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  link.download = `${who}-${shiftData.shift.started_at.slice(0, 10)}.csv`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+});
+
 // ---------------------------------------------------------------------------
-// RETURNS — owner only. A return needs a reason or receipt number before
-// it can be accepted — this is the "proof" requirement, enforced on the
-// server too.
+// RETURNS (owner). Needs proof: an invoice or slip number, or a reason.
 // ---------------------------------------------------------------------------
 
-let selectedReturnProduct = null;
+let returnProduct = null;
+const returnPicker = productPicker('retProductSearch', 'retProductResults', (p) => {
+  returnProduct = p;
+  showSelected('retSelectedProduct', p);
+});
 
 export function renderReturns() {
-  $('retProductSearch').value = '';
-  $('retProductResults').innerHTML = '';
-  $('retSelectedProduct').textContent = 'None selected';
-  selectedReturnProduct = null;
+  returnProduct = null;
+  returnPicker.reset();
+  showSelected('retSelectedProduct', null);
   $('retQuantity').value = 1;
   $('retReason').value = '';
-  $('retStatus').textContent = '';
-  $('retStatus').className = 'form-status';
+  const good = document.querySelector('input[name="retCondition"][value="good"]');
+  good.checked = true;
+  good.dispatchEvent(new Event('change', { bubbles: true })); // so the highlight follows
+  setStatus('retStatus');
 }
-
-$('retProductSearch').addEventListener('input', async (e) => {
-  const query = e.target.value;
-  const hits = await searchProducts(query);
-  $('retProductResults').innerHTML = hits.length
-    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}" data-name="${p.name}">${p.name} (${p.sku})</button>`).join('')
-    : (query.trim() ? NO_MATCH_NOTE : '');
-  $('retProductResults').querySelectorAll('.search-hit').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      selectedReturnProduct = { id: btn.dataset.id, name: btn.dataset.name };
-      $('retSelectedProduct').textContent = btn.dataset.name;
-      $('retProductSearch').value = '';
-      $('retProductResults').innerHTML = '';
-    });
-  });
-});
 
 $('retSubmitBtn').addEventListener('click', async () => {
-  const status = $('retStatus');
-  if (!selectedReturnProduct) {
-    status.textContent = 'Pick a product first.';
-    status.className = 'form-status err';
-    return;
-  }
-
+  const quantity = Number($('retQuantity').value);
   const reason = $('retReason').value.trim();
-  if (!reason) {
-    status.textContent = 'Please write the receipt number or a reason first. This is needed as proof for the return.';
-    status.className = 'form-status err';
-    return;
-  }
+  if (!returnProduct) return setStatus('retStatus', 'Pick the item being returned.', 'err');
+  if (!(quantity > 0)) return setStatus('retStatus', 'Enter the quantity returned.', 'err');
+  if (reason.length < 3) return setStatus('retStatus', 'Write the invoice or slip number, or the reason. It is the proof for this return.', 'err');
 
   const condition = document.querySelector('input[name="retCondition"]:checked').value;
-
   try {
     await withServerAuth(() => submitReturn({
-      id: crypto.randomUUID(),
-      product_id: selectedReturnProduct.id,
-      quantity_returned: Number($('retQuantity').value),
-      condition,
-      reason,
-      client_created_at: new Date().toISOString()
+      id: crypto.randomUUID(), product_id: returnProduct.id, quantity_returned: quantity,
+      condition, reason, client_created_at: new Date().toISOString(),
     }));
-    status.textContent = `Return accepted: ${selectedReturnProduct.name} (${condition}).`;
-    status.className = 'form-status ok';
+    toast(`Return accepted: ${returnProduct.name} (${condition}).`);
     renderReturns();
   } catch (err) {
-    status.textContent = `Failed. ${err.message}`;
-    status.className = 'form-status err';
+    setStatus('retStatus', `Failed. ${err.message}`, 'err');
   }
 });
 
 // ---------------------------------------------------------------------------
-// RECONCILIATION — owner only.
+// STAFF (owners). Owners use a 6-digit password and can turn on two-factor
+// login; cashiers use 4 digits. Deactivated accounts can't sign in but are
+// never deleted, so their history stays.
 // ---------------------------------------------------------------------------
 
-export async function renderReconciliation() {
-  $('recSystemOut').textContent = '\u2026';
-  $('recSystemIn').textContent = '\u2026';
-  $('recStatus').textContent = '';
-  $('recStatus').className = 'form-status';
+let staffRows = [];
+let editingStaff = null;
 
-  try {
-    const today = new Date().toISOString().slice(0, 10);
-    const totals = await withServerAuth(() => fetchTodayReconciliation(today));
-    $('recSystemOut').textContent = totals.system_qty_out;
-    $('recSystemIn').textContent = totals.system_qty_in;
-  } catch (err) {
-    $('recSystemOut').textContent = '-';
-    $('recSystemIn').textContent = '-';
-  }
+function applyPinLength(roleId, pinId) {
+  const length = pinLengthFor($(roleId).value);
+  $(pinId).maxLength = length;
+  $(pinId).placeholder = `${length}-digit password`;
 }
 
-$('recSubmitBtn').addEventListener('click', async () => {
-  const status = $('recStatus');
-  try {
-    const result = await withServerAuth(() => submitReconciliation({
-      id: crypto.randomUUID(),
-      business_date: new Date().toISOString().slice(0, 10),
-      physical_qty_out: Number($('recPhysicalOut').value),
-      physical_qty_in: Number($('recPhysicalIn').value),
-      notes: $('recNotes').value || null,
-      client_created_at: new Date().toISOString()
-    }));
-    status.textContent = result.status === 'matched'
-      ? 'Matched. Day closed clean.'
-      : `Discrepancy logged (out: ${result.discrepancy_out}, in: ${result.discrepancy_in}). Acknowledged.`;
-    status.className = 'form-status ok';
-  } catch (err) {
-    status.textContent = `Failed. ${err.message}`;
-    status.className = 'form-status err';
-  }
-});
-
-// ---------------------------------------------------------------------------
-// ANALYTICS — Top 10 / Bottom 5 movers, and cycle-count entry. Owner only.
-// ---------------------------------------------------------------------------
-
-export async function renderAnalytics() {
-  const fastBody = $('fastMoversTable').querySelector('tbody');
-  const slowBody = $('slowMoversTable').querySelector('tbody');
-  fastBody.innerHTML = '<tr class="empty-row"><td colspan="5">Loading...</td></tr>';
-  slowBody.innerHTML = '';
-
-  try {
-    const data = await withServerAuth(() => fetchMovers(7));
-    fastBody.innerHTML = moversRows(data.top_movers, 'top_mover');
-    slowBody.innerHTML = moversRows(data.slow_movers, 'slow_mover');
-    wireCycleCountRows();
-  } catch (err) {
-    fastBody.innerHTML = `<tr class="empty-row"><td colspan="5">Couldn't load. ${err.message}</td></tr>`;
-  }
+for (const id of ['usrPin', 'editStaffPin']) {
+  $(id).addEventListener('input', (e) => { e.target.value = e.target.value.replace(/\D/g, ''); });
 }
-
-function moversRows(items, reason) {
-  if (!items.length) return '<tr class="empty-row"><td colspan="5">Nothing in this window yet.</td></tr>';
-  return items.map((p) => `
-    <tr>
-      <td>${p.name}</td>
-      <td class="amt-cell">${p.units_moved}</td>
-      <td class="amt-cell" id="sysqty-${p.id}">-</td>
-      <td><input type="number" class="cycle-input" step="0.001" data-count-product="${p.id}" data-reason="${reason}" placeholder="count"></td>
-      <td><button type="button" class="btn-secondary" data-count-submit="${p.id}">Save</button></td>
-    </tr>`).join('');
-}
-
-function wireCycleCountRows() {
-  document.querySelectorAll('[data-count-submit]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const productId = btn.dataset.countSubmit;
-      const input = document.querySelector(`[data-count-product="${productId}"]`);
-      const reason = input.dataset.reason;
-      if (!input.value) return;
-
-      try {
-        const result = await withServerAuth(() => submitCycleCount({
-          id: crypto.randomUUID(),
-          business_date: new Date().toISOString().slice(0, 10),
-          product_id: productId,
-          reason,
-          physical_quantity: Number(input.value),
-          client_created_at: new Date().toISOString()
-        }));
-        const sysCell = $(`sysqty-${productId}`);
-        sysCell.textContent = result.system_quantity;
-        sysCell.className = 'amt-cell ' + (Math.abs(result.variance) < 0.001 ? 'variance-ok' : 'variance-bad');
-      } catch (err) {
-        window.alert(`Couldn't save count. ${err.message}`);
-      }
-    });
-  });
-}
-
-// ---------------------------------------------------------------------------
-// STAFF — manager+owner. Deactivating someone asks for confirmation
-// first. Edit lets any of a staff member's details be changed, including
-// resetting a PIN — this is also how an owner changes their own PIN.
-// Owner accounts get a 6-digit PIN and can turn on two-factor login with
-// Google Authenticator; cashier and manager accounts stay at 4 digits.
-// ---------------------------------------------------------------------------
-
-let editingStaffId = null;
-let editingStaffUser = null;
 
 export async function renderStaff() {
-  $('usrStatus').textContent = '';
-  $('usrStatus').className = 'form-status';
-  applyPinFieldFor('usrRole', 'usrPin');
-
-  const tbody = $('usersTable').querySelector('tbody');
-  tbody.innerHTML = '<tr class="empty-row"><td colspan="4">Loading...</td></tr>';
-
+  setStatus('usrStatus');
+  applyPinLength('usrRole', 'usrPin');
+  tableMessage('usersTable', 'Loading…');
   try {
-    const users = await withServerAuth(() => fetchUsers());
-    drawStaffTable(users);
+    const showInactive = $('staffShowInactive').checked;
+    staffRows = (await withServerAuth(() => fetchUsers(showInactive))).filter((u) => showInactive || u.is_active);
+    renderRows('usersTable', staffRows, (u) => `
+      <tr class="${u.is_active ? '' : 'is-muted'}">
+        <td>${personCell(u)}</td>
+        <td><span class="cap">${esc(u.role)}</span>${u.role === 'owner' && u.totp_enabled ? ` ${badge('2FA on', 'info')}` : ''}${u.is_active ? '' : ` ${badge('Deactivated')}`}</td>
+        <td class="actions">${u.is_active ? `
+          <button type="button" class="btn btn-sm" data-action="edit" data-id="${esc(u.id)}">Edit</button>
+          <button type="button" class="btn btn-sm btn-danger-soft" data-action="deactivate" data-id="${esc(u.id)}">Deactivate</button>` : `
+          <button type="button" class="btn btn-sm" data-action="restore" data-id="${esc(u.id)}">Restore</button>`}</td>
+      </tr>`, 'No staff accounts yet.');
   } catch (err) {
-    tbody.innerHTML = `<tr class="empty-row"><td colspan="4">Couldn't load. ${err.message}</td></tr>`;
+    tableMessage('usersTable', `Couldn't load. ${err.message}`);
   }
 }
 
-function applyPinFieldFor(roleSelectId, pinInputId) {
-  const isOwner = $(roleSelectId).value === 'owner';
-  const len = pinLengthFor($(roleSelectId).value);
-  $(pinInputId).maxLength = len;
-  $(pinInputId).placeholder = isOwner ? `${len}-digit PIN` : `${len}-digit PIN`;
-}
+$('staffShowInactive').addEventListener('change', renderStaff);
 
-$('usrRole').addEventListener('change', () => applyPinFieldFor('usrRole', 'usrPin'));
-
-function drawStaffTable(users) {
-  const tbody = $('usersTable').querySelector('tbody');
-  tbody.innerHTML = users.map((u) => `
-    <tr>
-      <td>${u.full_name}</td>
-      <td>${u.role}${u.role === 'owner' && u.totp_enabled ? ' (2FA on)' : ''}</td>
-      <td>${u.is_active ? 'Active' : 'Inactive'}</td>
-      <td>
-        <button type="button" class="btn-secondary" data-edit-staff="${u.id}">Edit</button>
-        <button type="button" class="btn-secondary" data-toggle="${u.id}" data-active="${u.is_active}">${u.is_active ? 'Deactivate' : 'Reactivate'}</button>
-      </td>
-    </tr>`).join('');
-
-  tbody.querySelectorAll('[data-edit-staff]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const user = users.find((u) => u.id === btn.dataset.editStaff);
-      if (user) openEditStaffModal(user);
-    });
-  });
-
-  tbody.querySelectorAll('[data-toggle]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const nowActive = btn.dataset.active === 'true';
-      if (nowActive && !window.confirm('Are you sure you want to deactivate this staff member? They will not be able to log in until reactivated.')) {
-        return;
-      }
-      await withServerAuth(() => updateUser(btn.dataset.toggle, { is_active: !nowActive }));
-      renderStaff();
-    });
-  });
-}
-
-function openEditStaffModal(user) {
-  editingStaffId = user.id;
-  editingStaffUser = { ...user };
-  $('editStaffName').value = user.full_name;
-  $('editStaffRole').value = user.role;
-  $('editStaffPin').value = '';
-  applyPinFieldFor('editStaffRole', 'editStaffPin');
-  $('editStaffStatus').textContent = '';
-  $('editStaffStatus').className = 'form-status';
-
-  refreshTwoFaSection();
-  $('editStaffOverlay').hidden = false;
-}
-
-function refreshTwoFaSection() {
-  const isOwner = $('editStaffRole').value === 'owner';
-  $('editStaffTwoFaSection').hidden = !isOwner;
-  if (!isOwner) return;
-  const enabled = !!editingStaffUser?.totp_enabled;
-  $('editStaffTwoFaStatus').textContent = enabled ? 'On' : 'Off';
-  $('editStaffTwoFaToggle').textContent = enabled ? 'Turn Off' : 'Set Up';
-}
-
-$('editStaffRole').addEventListener('change', () => {
-  applyPinFieldFor('editStaffRole', 'editStaffPin');
-  refreshTwoFaSection();
-});
-
-$('editStaffCancelBtn').addEventListener('click', () => { $('editStaffOverlay').hidden = true; });
-
-$('editStaffSubmitBtn').addEventListener('click', async () => {
-  const status = $('editStaffStatus');
-  const full_name = $('editStaffName').value.trim();
-  const role = $('editStaffRole').value;
-  const pin = $('editStaffPin').value.trim();
-  const expectedLen = pinLengthFor(role);
-
-  if (!full_name) {
-    status.textContent = 'Name cannot be empty.';
-    status.className = 'form-status err';
-    return;
-  }
-  if (pin && pin.length !== expectedLen) {
-    status.textContent = `A new PIN for this role must be exactly ${expectedLen} digits, or left blank to keep the current one.`;
-    status.className = 'form-status err';
-    return;
-  }
-
+async function setActive(id, is_active, done) {
   try {
-    await withServerAuth(() => updateUser(editingStaffId, { full_name, role, ...(pin ? { pin } : {}) }));
-    status.textContent = 'Saved.';
-    status.className = 'form-status ok';
-    setTimeout(() => { $('editStaffOverlay').hidden = true; }, 500);
+    await withServerAuth(() => updateUser(id, { is_active }));
+    toast(done);
     renderStaff();
   } catch (err) {
-    status.textContent = `Couldn't save. ${err.message}`;
-    status.className = 'form-status err';
+    toast(`Couldn't update the account. ${err.message}`, 'error');
   }
-});
-
-// ---- Two-factor setup, from inside Edit Staff, owner accounts only ----
-
-$('editStaffTwoFaToggle').addEventListener('click', async () => {
-  if (!editingStaffUser) return;
-
-  if (editingStaffUser.totp_enabled) {
-    if (!window.confirm('Turn off two-factor login for this account? They will only need their PIN to sign in after this.')) return;
-    try {
-      await withServerAuth(() => disableTwoFactor(editingStaffId));
-      editingStaffUser.totp_enabled = false;
-      refreshTwoFaSection();
-    } catch (err) {
-      window.alert(`Couldn't turn off two-factor login. ${err.message}`);
-    }
-    return;
-  }
-
-  try {
-    const { secret } = await withServerAuth(() => setupTwoFactor(editingStaffId));
-    openTwoFaModal(secret);
-  } catch (err) {
-    window.alert(`Couldn't start setup. ${err.message}`);
-  }
-});
-
-function formatSecretForDisplay(secret) {
-  return (secret.match(/.{1,4}/g) || [secret]).join(' ');
 }
 
-function openTwoFaModal(secret) {
-  $('twoFaSecretDisplay').textContent = formatSecretForDisplay(secret);
-  $('twoFaConfirmCode').value = '';
-  $('twoFaStatus').textContent = '';
-  $('twoFaStatus').className = 'form-status';
-  $('twoFaOverlay').hidden = false;
-}
-
-$('twoFaCancelBtn').addEventListener('click', () => { $('twoFaOverlay').hidden = true; });
-
-$('twoFaConfirmBtn').addEventListener('click', async () => {
-  const status = $('twoFaStatus');
-  const code = $('twoFaConfirmCode').value.trim();
-
-  if (code.length !== 6) {
-    status.textContent = 'Enter the 6-digit code shown in the authenticator app.';
-    status.className = 'form-status err';
-    return;
-  }
-
-  try {
-    await withServerAuth(() => verifyTwoFactor(editingStaffId, code));
-    status.textContent = 'Turned on.';
-    status.className = 'form-status ok';
-    editingStaffUser.totp_enabled = true;
-    refreshTwoFaSection();
-    setTimeout(() => { $('twoFaOverlay').hidden = true; }, 700);
-  } catch (err) {
-    status.textContent = `Couldn't confirm. ${err.message}`;
-    status.className = 'form-status err';
-  }
+onAction('usersTable', {
+  edit: (id) => openEditStaff(staffRows.find((u) => u.id === id)),
+  deactivate: async (id) => {
+    const user = staffRows.find((u) => u.id === id);
+    const yes = await showConfirm('Deactivate this account?', {
+      message: `${user.full_name} won't be able to sign in. Their shifts and sales stay on record, and the account can be restored.`,
+      confirmLabel: 'Deactivate',
+      danger: true,
+    });
+    if (yes) setActive(id, false, `${user.full_name} was deactivated.`);
+  },
+  restore: (id) => setActive(id, true, 'Account restored.'),
 });
 
-// ---- Add staff ----
+$('usrRole').addEventListener('change', () => applyPinLength('usrRole', 'usrPin'));
 
 $('usrAddBtn').addEventListener('click', async () => {
-  const status = $('usrStatus');
   const full_name = $('usrName').value.trim();
-  const pin = $('usrPin').value.trim();
   const role = $('usrRole').value;
-  const expectedLen = pinLengthFor(role);
-
-  if (!full_name || pin.length !== expectedLen) {
-    status.textContent = `Name and a ${expectedLen}-digit PIN are both required for this role.`;
-    status.className = 'form-status err';
-    return;
-  }
+  const pin = $('usrPin').value.trim();
+  const length = pinLengthFor(role);
+  if (!full_name || pin.length !== length) return setStatus('usrStatus', `Enter a name and a ${length}-digit password.`, 'err');
 
   try {
     await withServerAuth(() => createUser({ full_name, role, pin }));
-    status.textContent = `Added ${full_name}.`;
-    status.className = 'form-status ok';
-    $('usrName').value = '';
-    $('usrPin').value = '';
+    $('usrName').value = $('usrPin').value = '';
+    toast(`${full_name} was added.`);
     renderStaff();
   } catch (err) {
-    status.textContent = `Failed. ${err.message}`;
-    status.className = 'form-status err';
+    setStatus('usrStatus', `Failed. ${err.message}`, 'err');
   }
 });
 
-// ---------------------------------------------------------------------------
-// ARCHIVES — a read-only view of what's already archived across Products
-// and Staff. No purge, here or anywhere in this app — archived just means
-// hidden from the main list and fully restorable, same as it's always
-// worked. Reuses fetchStock/updateProduct and fetchUsers/updateUser; no
-// new backend calls needed for this screen.
-// ---------------------------------------------------------------------------
+function openEditStaff(user) {
+  if (!user) return;
+  editingStaff = { ...user };
+  $('editStaffName').value = user.full_name;
+  $('editStaffRole').value = user.role;
+  $('editStaffPin').value = '';
+  applyPinLength('editStaffRole', 'editStaffPin');
+  setStatus('editStaffStatus');
+  refreshTwoFa();
+  openModal('editStaffOverlay');
+}
 
-export async function renderArchives() {
-  const itemsBody = $('archivedItemsTable').querySelector('tbody');
-  const staffBody = $('archivedStaffTable').querySelector('tbody');
-  itemsBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
-  staffBody.innerHTML = '<tr class="empty-row"><td colspan="3">Loading...</td></tr>';
+function refreshTwoFa() {
+  $('editStaffTwoFaSection').hidden = $('editStaffRole').value !== 'owner';
+  const on = !!editingStaff?.totp_enabled;
+  $('editStaffTwoFaStatus').textContent = on ? 'On' : 'Off';
+  $('editStaffTwoFaToggle').textContent = on ? 'Turn off' : 'Set up';
+}
+
+$('editStaffRole').addEventListener('change', () => {
+  applyPinLength('editStaffRole', 'editStaffPin');
+  refreshTwoFa();
+});
+
+$('editStaffSubmitBtn').addEventListener('click', async () => {
+  const full_name = $('editStaffName').value.trim();
+  const role = $('editStaffRole').value;
+  const pin = $('editStaffPin').value.trim();
+  const length = pinLengthFor(role);
+  if (!full_name) return setStatus('editStaffStatus', 'Name cannot be empty.', 'err');
+  if (pin && pin.length !== length) return setStatus('editStaffStatus', `A new password for this role must be ${length} digits, or leave it blank.`, 'err');
 
   try {
-    const allStock = await withServerAuth(() => fetchStock(true));
-    const archivedItems = allStock.filter((r) => !r.is_active);
-    itemsBody.innerHTML = archivedItems.length
-      ? archivedItems.map((r) => `
-          <tr>
-            <td>${r.name}</td>
-            <td class="sku-tag">${r.sku}</td>
-            <td><button type="button" class="btn-secondary" data-restore-item="${r.id}">Restore</button></td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="3">Nothing archived.</td></tr>';
-
-    itemsBody.querySelectorAll('[data-restore-item]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await withServerAuth(() => updateProduct(btn.dataset.restoreItem, { is_active: true }));
-        renderArchives();
-      });
-    });
+    await withServerAuth(() => updateUser(editingStaff.id, { full_name, role, ...(pin ? { pin } : {}) }));
+    closeModal('editStaffOverlay');
+    toast('Staff details saved.');
+    renderStaff();
   } catch (err) {
-    itemsBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
+    setStatus('editStaffStatus', `Couldn't save. ${err.message}`, 'err');
+  }
+});
+
+$('editStaffTwoFaToggle').addEventListener('click', async () => {
+  if (!editingStaff) return;
+
+  if (editingStaff.totp_enabled) {
+    if (!(await showConfirm('Turn off two-factor login?', { message: 'This account will only need its password to sign in.', confirmLabel: 'Turn off', danger: true }))) return;
+    try {
+      await withServerAuth(() => disableTwoFactor(editingStaff.id));
+      editingStaff.totp_enabled = false;
+      refreshTwoFa();
+      renderStaff();
+    } catch (err) {
+      toast(`Couldn't turn off two-factor login. ${err.message}`, 'error');
+    }
+    return;
   }
 
   try {
-    const allStaff = await withServerAuth(() => fetchUsers());
-    const archivedStaff = allStaff.filter((u) => !u.is_active);
-    staffBody.innerHTML = archivedStaff.length
-      ? archivedStaff.map((u) => `
-          <tr>
-            <td>${u.full_name}</td>
-            <td>${u.role}</td>
-            <td><button type="button" class="btn-secondary" data-restore-staff="${u.id}">Restore</button></td>
-          </tr>`).join('')
-      : '<tr class="empty-row"><td colspan="3">Nothing archived.</td></tr>';
-
-    staffBody.querySelectorAll('[data-restore-staff]').forEach((btn) => {
-      btn.addEventListener('click', async () => {
-        await withServerAuth(() => updateUser(btn.dataset.restoreStaff, { is_active: true }));
-        renderArchives();
-      });
-    });
+    const { secret, otpauth_url } = await withServerAuth(() => setupTwoFactor(editingStaff.id));
+    $('twoFaSecretDisplay').textContent = (secret.match(/.{1,4}/g) ?? [secret]).join(' ');
+    $('twoFaConfirmCode').value = '';
+    $('twoFaQr').innerHTML = '';
+    setStatus('twoFaStatus');
+    openModal('twoFaOverlay');
+    const dataUrl = await QRCode.toDataURL(otpauth_url, { width: 184, margin: 1 }).catch(() => null);
+    if (dataUrl) $('twoFaQr').innerHTML = `<img src="${dataUrl}" width="184" height="184" alt="QR code for the authenticator app">`;
   } catch (err) {
-    staffBody.innerHTML = `<tr class="empty-row"><td colspan="3">Couldn't load. ${err.message}</td></tr>`;
+    toast(`Couldn't start two-factor setup. ${err.message}`, 'error');
+  }
+});
+
+async function confirmTwoFa() {
+  const code = $('twoFaConfirmCode').value.trim();
+  if (code.length !== 6) return setStatus('twoFaStatus', 'Enter the 6-digit code shown in the app.', 'err');
+  try {
+    await withServerAuth(() => verifyTwoFactor(editingStaff.id, code));
+    editingStaff.totp_enabled = true;
+    refreshTwoFa();
+    closeModal('twoFaOverlay');
+    toast('Two-factor login is on.');
+    renderStaff();
+  } catch (err) {
+    setStatus('twoFaStatus', `Couldn't confirm. ${err.message}`, 'err');
   }
 }
+
+$('twoFaConfirmBtn').addEventListener('click', confirmTwoFa);
+$('twoFaConfirmCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTwoFa(); });

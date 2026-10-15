@@ -6,12 +6,15 @@ use App\Traits\HasUuid;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
+// A pick list: items for the stockroom to get ready. Made by every sale (with
+// sale_id) or sent by hand without charging. Status: pending, fulfilled
+// (picked up), or cancelled (its sale was voided).
 class MaterialRequest extends Model
 {
     use HasUuid;
 
     protected $fillable = [
-        'terminal_id', 'requested_by', 'items', 'status', 'notes',
+        'terminal_id', 'sale_id', 'requested_by', 'items', 'status', 'notes',
         'fulfilled_by', 'fulfilled_at', 'client_created_at',
     ];
 
@@ -29,5 +32,10 @@ class MaterialRequest extends Model
     public function fulfilledBy(): BelongsTo
     {
         return $this->belongsTo(User::class, 'fulfilled_by');
+    }
+
+    public function sale(): BelongsTo
+    {
+        return $this->belongsTo(Sale::class);
     }
 }

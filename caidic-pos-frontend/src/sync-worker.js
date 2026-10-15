@@ -1,227 +1,133 @@
-// sync-worker.js
-// Local-write-then-enqueue, real connectivity detection, backoff push,
-// catalog pull — talking to the Laravel API. Sync authenticates as the
-// TERMINAL (X-Terminal-Key, set once at device setup), not as whichever
-// staff member happens to be logged in. Login itself is fully local —
-// see input-handler.js's verifyStaffLogin(). A per-user Sanctum token
-// still exists, but it's only fetched on demand, right before an
-// owner-gated call (Returns, Reconciliation, Analytics, Activity log) —
-// never required just to open the till.
+// sync-worker.js — everything that talks to the server, plus the local-first
+// writes (sales, shifts, payments, stock, logs) that the outbox pushes up
+// later.
+//
+// The server is Supabase: Postgres functions (supabase/migrations) called at
+// /rest/v1/rpc/<name>. Routine sync authenticates as the TERMINAL (its key,
+// set once when the device is provisioned), never as whoever is signed in.
+// Screens that read the server use a per-person token instead (session.js).
 
 import {
   db, getTerminalId, getSyncMeta, setSyncMeta,
-  getTerminalKey, getAuthToken, setAuthToken, clearAuthToken
+  getTerminalKey, getAuthToken, setAuthToken, clearAuthToken,
 } from './local-db.js';
 
-const API_BASE = import.meta.env.VITE_API_BASE; // e.g. https://api.caidichardware.example/api
+// The project's address (https://<ref>.supabase.co) and its publishable key
+// (or the older anon key). Both are public by design: the terminal key and
+// each person's password, checked by the functions, are what protect the data.
+const SUPABASE_URL = (import.meta.env.VITE_SUPABASE_URL ?? '').replace(/\/+$/, '');
+const SUPABASE_KEY = import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY || import.meta.env.VITE_SUPABASE_ANON_KEY || '';
+export const serverConfigured = Boolean(SUPABASE_URL && SUPABASE_KEY);
 
-function round2(n) { return Math.round(n * 100) / 100; }
-function round3(n) { return Math.round(n * 1000) / 1000; }
-
-class AuthRequiredError extends Error {
-  constructor(kind) { super(`${kind} credential missing or rejected`); this.name = 'AuthRequiredError'; this.kind = kind; }
-}
-
-// mode: 'terminal' for routine catalog/sync traffic (device credential,
-// always available once provisioned, works with no staff logged in at
-// all). mode: 'user' for the owner-gated endpoints (per-user Sanctum
-// token, fetched just-in-time — see loginWithPin()).
-async function api(path, { method = 'GET', body, mode = 'terminal' } = {}) {
-  const headers = {
+// A legacy anon key is a JWT and also goes in Authorization; a publishable
+// key (sb_publishable_...) only goes in apikey.
+const HEADERS = {
   'Content-Type': 'application/json',
-  'Accept': 'application/json',
-  'X-Terminal-Id': await getTerminalId()
+  Accept: 'application/json',
+  apikey: SUPABASE_KEY,
+  ...(SUPABASE_KEY.startsWith('eyJ') ? { Authorization: `Bearer ${SUPABASE_KEY}` } : {}),
 };
 
-  if (mode === 'terminal') {
-    const key = await getTerminalKey();
-    if (!key) throw new AuthRequiredError('terminal'); // device was never provisioned — needs the one-time setup screen
-    headers['X-Terminal-Key'] = key;
-  } else if (mode === 'user') {
-    const token = await getAuthToken();
-    if (!token) throw new AuthRequiredError('user'); // no owner session yet — caller should prompt loginWithPin()
-    headers.Authorization = `Bearer ${token}`;
+const round2 = (n) => Math.round(n * 100) / 100;
+const round3 = (n) => Math.round(n * 1000) / 1000;
+const nowIso = () => new Date().toISOString();
+
+class AuthRequiredError extends Error {
+  constructor(kind) {
+    super(`${kind} credential missing or rejected`);
+    this.name = 'AuthRequiredError';
+    this.kind = kind;
+  }
+}
+
+// Sent with server calls so actions taken there land in the right shift.
+let activeShiftId = null;
+export const setActiveShift = (id) => { activeShiftId = id; };
+
+// Calls one server function with { auth, args }. The terminal id and the
+// shift go with every call, so actions taken there land in the right shift.
+// mode 'terminal': device credential (catalog pull, outbox push, sign-in).
+// mode 'user': per-person token for screens that read the server.
+async function rpc(fn, args = {}, { mode = 'user' } = {}) {
+  if (!serverConfigured) {
+    throw new Error('This copy of the app was built without its server address (VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY).');
   }
 
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 15_000);
+  const auth = { terminal_id: await getTerminalId(), shift_id: activeShiftId };
+  if (mode === 'terminal') {
+    auth.terminal_key = await getTerminalKey();
+    if (!auth.terminal_key) throw new AuthRequiredError('terminal');
+  } else if (mode === 'user') {
+    auth.token = await getAuthToken();
+    if (!auth.token) throw new AuthRequiredError('user');
+  }
+
   let res;
   try {
-    res = await fetch(`${API_BASE}${path}`, {
-      method, headers, body: body ? JSON.stringify(body) : undefined, signal: controller.signal
+    res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/${fn}`, {
+      method: 'POST', headers: HEADERS, body: JSON.stringify({ auth, args }), signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
-    // A network-level failure (offline, wrong API URL, CORS, DNS, etc.)
-    // never reaches the response handling below — surfaced here with
-    // whatever detail the browser gave, instead of silently becoming an
-    // unreadable generic failure further up.
-    throw new Error(`Could not reach the server (${err.message}). Check the internet connection and that this device's API address is set up correctly.`);
-  } finally {
-    clearTimeout(timeout);
+    throw new Error(`Could not reach the server (${err.message}). Check the internet connection.`);
   }
 
-  if (res.status === 401 || res.status === 403) {
-    if (mode === 'user') await clearAuthToken(); // a rejected per-user token is worth clearing; a rejected terminal key needs re-provisioning, not clearing
+  const text = await res.text();
+  let body = null;
+  try {
+    body = text ? JSON.parse(text) : null;
+  } catch { /* not JSON */ }
+  if (res.ok) return body;
+
+  const message = body?.message ?? '';
+  // PT401 / PT403: the functions refused this terminal's key or this person's sign-in.
+  if (body?.code === 'PT401' || body?.code === 'PT403') {
+    if (mode === 'user') await clearAuthToken(); // a rejected terminal key needs re-provisioning, not clearing
     throw new AuthRequiredError(mode);
   }
-
-  if (!res.ok) {
-  let detail = '';
-  try {
-    const body = await res.json();
-    if (body.message) detail = `: ${body.message}`;
-  } catch { /* not JSON, ignore */ }
-  throw new Error(`${method} ${path} failed: ${res.status}${detail}`);
-}
-  return res.status === 204 ? null : res.json();
-}
-
-// ---------------------------------------------------------------------------
-// AUTH
-// ---------------------------------------------------------------------------
-
-// PIN -> Sanctum token, fetched on demand right before an owner-gated
-// action. Requires connectivity — that's an accepted limitation for these
-// specific actions, established from the start, not a regression.
-export async function loginWithPin(user_id, pin) {
-  const { token } = await api('/auth/login', { method: 'POST', body: { user_id, pin }, mode: 'none' });
-  await setAuthToken(token);
+  // Supabase itself refused: a wrong project key, or the SQL was never run.
+  if (res.status === 401 || res.status === 403) {
+    throw new Error(`Supabase refused the request (${message || res.status}). Check the project address and key this app was built with.`);
+  }
+  if (body?.code === 'PGRST202') {
+    throw new Error('The server is missing the POS functions. Run the SQL files in the supabase folder on the Supabase project.');
+  }
+  // A refusal with a reason (wrong password, request expired, ...) is shown
+  // as just that reason; anything else keeps the technical details.
+  if (res.status < 500 && message) throw new Error(message);
+  throw new Error(`${fn} failed: ${res.status}${message ? `: ${message}` : ''}`);
 }
 
-export async function logout() {
-  try { await api('/auth/logout', { method: 'POST', mode: 'user' }); } catch { /* best-effort */ }
+// Swaps a person's password for a server token (the caller decides whether to keep it).
+export async function requestToken(user_id, password) {
+  const { token } = await rpc('pos_login', { user_id, pin: password }, { mode: 'terminal' });
+  return token;
+}
+
+export const saveServerLogin = (token) => setAuthToken(token);
+
+// The server token belongs to whoever confirmed their PIN. It's revoked (when
+// online) and forgotten at sign-out, so the next person never inherits it.
+export async function forgetServerLogin() {
+  if (await getAuthToken()) await rpc('pos_logout', {}, { mode: 'user' }).catch(() => {});
   await clearAuthToken();
 }
 
 // ---------------------------------------------------------------------------
-// LOCAL WRITES — sales/shifts/movements write locally first, always,
-// regardless of any credential's state. completeSale() still doesn't
-// allocate against stock_batches yet (flagged repeatedly, not silently
-// resolved here).
+// Local-first writes. Each one is saved on this device and queued in the
+// outbox in the same transaction, whatever the connection is doing.
 // ---------------------------------------------------------------------------
 
 async function enqueue(entity_type, entity_id, payload) {
   await db.outbox_queue.add({
     id: crypto.randomUUID(), entity_type, entity_id, payload,
-    status: 'pending', retry_count: 0, created_at: new Date().toISOString()
-  });
-}
-
-export async function completeSale({
-  cashier_id, shift_id, cart, payment_method,
-  amount_tendered = null, discount_amount = 0, tax_amount = 0
-}) {
-  const sale_id = crypto.randomUUID();
-  const terminal_id = await getTerminalId();
-  const client_created_at = new Date().toISOString();
-
-  const subtotal = round2(cart.reduce((sum, line) => sum + line.line_total, 0));
-  const total_amount = round2(subtotal - discount_amount + tax_amount);
-  const change_amount = amount_tendered != null ? round2(amount_tendered - total_amount) : null;
-
-  const sale = {
-    id: sale_id, terminal_id, cashier_id, shift_id,
-    subtotal, discount_amount, tax_amount, total_amount,
-    payment_method, amount_tendered, change_amount,
-    status: 'completed', client_created_at
-  };
-
-  const items = cart.map((line) => ({
-    id: crypto.randomUUID(), sale_id, product_id: line.product_id,
-    sku_snapshot: line.sku_snapshot, name_snapshot: line.name_snapshot,
-    unit_price_snapshot: line.unit_price_snapshot, quantity: line.quantity,
-    line_discount: line.line_discount ?? 0, line_total: line.line_total,
-    voided_at: null, voided_by: null
-  }));
-
-  // TODO: allocate against stock_batches, oldest received_at first, and
-  // tag each movement with a batch_id — the architecture doc's allocateFifo(),
-  // still not built. Recorded correctly in the ledger either way; just not
-  // batch-aware yet.
-  const movements = cart.map((line) => ({
-    id: crypto.randomUUID(), product_id: line.product_id, batch_id: null,
-    terminal_id, delta: -Math.abs(line.quantity), reason: 'sale',
-    reference_id: sale_id, actor_id: cashier_id, client_created_at
-  }));
-
-  await db.transaction('rw', db.sales, db.sale_items, db.stock_movements, db.outbox_queue, async () => {
-    await db.sales.add(sale);
-    await db.sale_items.bulkAdd(items);
-    await db.stock_movements.bulkAdd(movements);
-    await enqueue('sale', sale_id, { sale, items, movements });
-  });
-
-  // A completed sale is its own event in Staff Logs, not just the
-  // individual "item added" entries leading up to it — this was
-  // missing before, so a finished sale left no record of itself.
-  await logActivity({
-    actor_id: cashier_id, shift_id, event_type: 'sale_completed',
-    entity_type: 'sale', entity_id: sale_id, details: { total_amount, item_count: cart.length }
-  });
-
-  return sale_id;
-}
-
-export async function receiveStock({ product_id, location, quantity, damaged_quantity = 0, actor_id }) {
-  const batch_id = crypto.randomUUID();
-  const client_created_at = new Date().toISOString();
-  const terminal_id = await getTerminalId();
-
-  const batch = {
-    id: batch_id, product_id, location, received_at: client_created_at,
-    qty_received: quantity, qty_good_remaining: round3(quantity - damaged_quantity),
-    qty_damaged: damaged_quantity, source: 'receiving', reference_id: null,
-    created_by: actor_id, client_created_at
-  };
-
-  await db.transaction('rw', db.stock_batches, db.outbox_queue, async () => {
-    await db.stock_batches.add(batch);
-    await enqueue('stock_batch', batch_id, { ...batch, terminal_id });
-  });
-
-  return batch_id;
-}
-
-// Material Pick Lists — same local-write-then-enqueue pattern as
-// completeSale()/receiveStock(). Any logged-in staff member can submit
-// one; it's a routine terminal action, not an owner-gated one, so it
-// syncs with the terminal key like everything else in this section.
-export async function submitMaterialRequest({ requested_by, items, notes = null }) {
-  const request_id = crypto.randomUUID();
-  const terminal_id = await getTerminalId();
-  const client_created_at = new Date().toISOString();
-
-  const request = {
-    id: request_id, terminal_id, requested_by, items, notes,
-    status: 'pending', client_created_at
-  };
-
-  await db.transaction('rw', db.material_requests, db.outbox_queue, async () => {
-    await db.material_requests.add(request);
-    await enqueue('material_request', request_id, request);
-  });
-
-  return request_id;
-}
-
-export async function logFailedPinAttempt({ actor_id = null, context = {} }) {
-  const terminal_id = await getTerminalId();
-  const audit = {
-    id: crypto.randomUUID(), terminal_id, actor_id, approver_id: null,
-    action_type: 'failed_pin_attempt', entity_type: context.entity_type ?? null,
-    entity_id: context.entity_id ?? null, details: context, client_created_at: new Date().toISOString()
-  };
-  await db.transaction('rw', db.audit_logs, db.outbox_queue, async () => {
-    await db.audit_logs.add(audit);
-    await enqueue('audit_log', audit.id, audit);
+    status: 'pending', retry_count: 0, created_at: nowIso(),
   });
 }
 
 export async function logActivity({ actor_id, shift_id = null, event_type, entity_type = null, entity_id = null, details = {} }) {
-  const terminal_id = await getTerminalId();
   const activity = {
-    id: crypto.randomUUID(), terminal_id, actor_id, shift_id, event_type,
-    entity_type, entity_id, details, client_created_at: new Date().toISOString()
+    id: crypto.randomUUID(), terminal_id: await getTerminalId(), actor_id, shift_id, event_type,
+    entity_type, entity_id, details, client_created_at: nowIso(),
   };
   await db.transaction('rw', db.activity_log, db.outbox_queue, async () => {
     await db.activity_log.add(activity);
@@ -229,39 +135,221 @@ export async function logActivity({ actor_id, shift_id = null, event_type, entit
   });
 }
 
-export async function openShift({ cashier_id, opening_cash }) {
+// FIFO: each sale line draws from this device's copy of the store's batches,
+// oldest first, and tags every movement with the batch it came from (that is
+// what lets a later void put the stock back). A shortfall (stale copy or a
+// real oversell) is still recorded; the server flags it for the owner.
+async function allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, client_created_at }) {
+  let remaining = round3(Math.abs(line.quantity));
+  const movements = [];
+  const movement = (batch_id, delta) => ({
+    id: crypto.randomUUID(), product_id: line.product_id, batch_id, terminal_id,
+    delta, reason: 'sale', reference_id: sale_id, actor_id: cashier_id, client_created_at,
+  });
+
+  const batches = await db.stock_batches
+    .where('product_id').equals(line.product_id)
+    .and((b) => b.location === 'store' && b.qty_good_remaining > 0)
+    .sortBy('received_at');
+
+  for (const batch of batches) {
+    if (remaining <= 0) break;
+    const take = round3(Math.min(remaining, batch.qty_good_remaining));
+    if (take <= 0) continue;
+    movements.push(movement(batch.id, -take));
+    await db.stock_batches.update(batch.id, { qty_good_remaining: round3(batch.qty_good_remaining - take) });
+    remaining = round3(remaining - take);
+  }
+
+  if (remaining > 0) {
+    const last = movements.at(-1);
+    if (last) last.delta = round3(last.delta - remaining);
+    else movements.push(movement(null, -remaining));
+  }
+
+  return movements;
+}
+
+// No VAT is added here on purpose: this is not a BIR-accredited POS and the
+// shelf price is the price paid, so the total is the sum of the lines.
+//
+// payment: { method: 'cash' | 'gcash' | 'credit', tendered, paid,
+// reference, customer_id }. `paid` is what changed hands at the counter; on a
+// credit sale the rest (total - paid) is what the customer owes.
+export async function completeSale({ cashier_id, shift_id, cart, payment }) {
+  const sale_id = crypto.randomUUID();
   const terminal_id = await getTerminalId();
+  const client_created_at = nowIso();
+  const total_amount = round2(cart.reduce((sum, line) => sum + line.line_total, 0));
+  const { method, tendered = null, paid = total_amount, reference = null, customer_id = null } = payment;
+
+  const sale = {
+    id: sale_id, terminal_id, cashier_id, shift_id,
+    subtotal: total_amount, discount_amount: 0, tax_amount: 0, total_amount,
+    payment_method: method,
+    amount_tendered: tendered,
+    change_amount: method === 'cash' && tendered != null ? round2(tendered - total_amount) : null,
+    amount_paid: round2(paid),
+    payment_reference: reference,
+    customer_id,
+    status: 'completed', client_created_at,
+  };
+
+  const items = cart.map((line) => ({
+    id: crypto.randomUUID(), sale_id, product_id: line.product_id,
+    sku_snapshot: line.sku_snapshot, name_snapshot: line.name_snapshot,
+    unit_price_snapshot: line.unit_price_snapshot, quantity: line.quantity,
+    line_discount: line.line_discount ?? 0, line_total: line.line_total,
+    voided_at: null, voided_by: null,
+  }));
+
+  // The stockroom gets the items ready: every sale goes to the pick lists,
+  // saved together with the sale so one never exists without the other.
+  const pickList = {
+    id: crypto.randomUUID(), terminal_id, sale_id, requested_by: cashier_id, notes: null,
+    items: cart.map((line) => ({
+      product_id: line.product_id, sku_snapshot: line.sku_snapshot, name_snapshot: line.name_snapshot,
+      unit_snapshot: line.unit_snapshot, quantity_requested: line.quantity,
+    })),
+    status: 'pending', client_created_at,
+  };
+
+  await db.transaction('rw', [db.sales, db.sale_items, db.stock_movements, db.stock_batches, db.material_requests, db.outbox_queue], async () => {
+    await db.sales.add(sale);
+    await db.sale_items.bulkAdd(items);
+
+    const movements = [];
+    for (const line of cart) {
+      movements.push(...await allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, client_created_at }));
+    }
+
+    await db.stock_movements.bulkAdd(movements);
+    await enqueue('sale', sale_id, { sale, items, movements });
+    await db.material_requests.add(pickList);
+    await enqueue('material_request', pickList.id, pickList);
+  });
+
+  await logActivity({
+    actor_id: cashier_id, shift_id, event_type: 'sale_completed', entity_type: 'sale', entity_id: sale_id,
+    details: { total_amount, item_count: cart.length, payment_method: method },
+  });
+
+  return sale_id;
+}
+
+export async function receiveStock({ product_id, location, quantity, damaged_quantity = 0, actor_id }) {
+  const client_created_at = nowIso();
+  const batch = {
+    id: crypto.randomUUID(), product_id, location, received_at: client_created_at,
+    qty_received: quantity, qty_good_remaining: round3(quantity - damaged_quantity),
+    qty_damaged: damaged_quantity, source: 'receiving', reference_id: null,
+    created_by: actor_id, client_created_at,
+  };
+  const terminal_id = await getTerminalId();
+
+  await db.transaction('rw', db.stock_batches, db.outbox_queue, async () => {
+    await db.stock_batches.add(batch);
+    await enqueue('stock_batch', batch.id, { ...batch, terminal_id });
+  });
+
+  return batch.id;
+}
+
+// Any staff member can send a pick list, from Billing or the Pick lists screen.
+export async function submitMaterialRequest({ requested_by, shift_id = null, items, notes = null }) {
+  const request = {
+    id: crypto.randomUUID(), terminal_id: await getTerminalId(), requested_by, items, notes,
+    status: 'pending', client_created_at: nowIso(),
+  };
+
+  await db.transaction('rw', db.material_requests, db.outbox_queue, async () => {
+    await db.material_requests.add(request);
+    await enqueue('material_request', request.id, request);
+  });
+
+  await logActivity({
+    actor_id: requested_by, shift_id, event_type: 'material_request_sent',
+    entity_type: 'material_request', entity_id: request.id, details: { item_count: items.length },
+  });
+
+  return request.id;
+}
+
+// Credit customers are created at the register, so this works offline.
+export async function saveCustomer({ id = crypto.randomUUID(), name, phone = null }) {
+  const customer = { id, name: name.trim(), phone: phone?.trim() || null, is_active: true };
+  await db.transaction('rw', db.customers, db.outbox_queue, async () => {
+    await db.customers.put(customer);
+    await enqueue('customer', id, customer);
+  });
+  return customer;
+}
+
+export async function recordCreditPayment({ customer_id, amount, payment_method, reference = null, note = null, received_by, shift_id }) {
+  const payment = {
+    id: crypto.randomUUID(), customer_id, amount: round2(amount), payment_method, reference, note,
+    terminal_id: await getTerminalId(), shift_id, received_by, client_created_at: nowIso(),
+  };
+  await db.transaction('rw', db.credit_payments, db.outbox_queue, async () => {
+    await db.credit_payments.add(payment);
+    await enqueue('credit_payment', payment.id, payment);
+  });
+  await logActivity({
+    actor_id: received_by, shift_id, event_type: 'credit_payment_received',
+    entity_type: 'customer', entity_id: customer_id, details: { amount: payment.amount, payment_method },
+  });
+  return payment;
+}
+
+// ---------------------------------------------------------------------------
+// Shifts: one per person, from clock-in (sign-in) to clock-out (End shift).
+// ---------------------------------------------------------------------------
+
+export async function openShift({ cashier_id, opening_cash }) {
   const shift = {
-    id: crypto.randomUUID(), terminal_id, cashier_id,
-    started_at: new Date().toISOString(), ended_at: null,
+    id: crypto.randomUUID(), terminal_id: await getTerminalId(), cashier_id,
+    started_at: nowIso(), ended_at: null,
     opening_cash, expected_cash: null, counted_cash: null,
-    cash_discrepancy: null, status: 'open'
+    cash_discrepancy: null, status: 'open',
   };
   await db.transaction('rw', db.shift_logs, db.outbox_queue, async () => {
     await db.shift_logs.add(shift);
     await enqueue('shift_log', shift.id, shift);
   });
+  await logActivity({ actor_id: cashier_id, shift_id: shift.id, event_type: 'shift_started', entity_type: 'shift_log', entity_id: shift.id, details: { opening_cash } });
   return shift.id;
 }
 
+// The cash that should be in the drawer: what it started with, plus cash
+// sales, down payments on credit sales, and cash credit payments taken.
+export async function shiftCash(shift_id) {
+  const shift = await db.shift_logs.get(shift_id);
+  const sales = await db.sales.where('shift_id').equals(shift_id).filter((s) => s.status === 'completed').toArray();
+  const payments = await db.credit_payments.where('shift_id').equals(shift_id).toArray();
+
+  const cashIn = round2(
+    sales.reduce((sum, s) => sum + (s.payment_method === 'cash' ? s.total_amount : s.payment_method === 'credit' ? s.amount_paid ?? 0 : 0), 0)
+    + payments.reduce((sum, p) => sum + (p.payment_method === 'cash' ? p.amount : 0), 0),
+  );
+  return { opening: shift.opening_cash ?? 0, cashIn, expected: round2((shift.opening_cash ?? 0) + cashIn), salesCount: sales.length };
+}
+
+// Clock-out. counted_cash is the person's own blind count of the drawer;
+// null when there was no cash to count.
 export async function closeShift({ shift_id, counted_cash }) {
   const shift = await db.shift_logs.get(shift_id);
   if (!shift) throw new Error('Shift not found');
 
-  const cashSales = await db.sales
-    .where({ shift_id })
-    .and((s) => s.status === 'completed' && s.payment_method === 'cash')
-    .toArray();
-  const cashTotal = cashSales.reduce((sum, s) => sum + s.total_amount, 0);
-  const expected_cash = round2(shift.opening_cash + cashTotal);
-  const cash_discrepancy = round2(counted_cash - expected_cash);
-  const ended_at = new Date().toISOString();
-  const updated = { ...shift, ended_at, expected_cash, counted_cash, cash_discrepancy, status: 'closed' };
+  const { expected } = await shiftCash(shift_id);
+  const counted = counted_cash == null ? null : round2(counted_cash);
+  const cash_discrepancy = counted == null ? null : round2(counted - expected);
+  const ended_at = nowIso();
+  const updated = { ...shift, ended_at, expected_cash: expected, counted_cash: counted, cash_discrepancy, status: 'closed' };
 
-  const audit = Math.abs(cash_discrepancy) > 0 ? {
+  const audit = cash_discrepancy ? {
     id: crypto.randomUUID(), terminal_id: shift.terminal_id, actor_id: shift.cashier_id,
     approver_id: null, action_type: 'shift_close_discrepancy', entity_type: 'shift_log',
-    entity_id: shift_id, details: { expected_cash, counted_cash, cash_discrepancy }, client_created_at: ended_at
+    entity_id: shift_id, details: { expected_cash: expected, counted_cash: counted, cash_discrepancy }, client_created_at: ended_at,
   } : null;
 
   await db.transaction('rw', db.shift_logs, db.audit_logs, db.outbox_queue, async () => {
@@ -272,313 +360,202 @@ export async function closeShift({ shift_id, counted_cash }) {
       await enqueue('audit_log', audit.id, audit);
     }
   });
+  await logActivity({ actor_id: shift.cashier_id, shift_id, event_type: 'shift_ended', entity_type: 'shift_log', entity_id: shift_id, details: { expected_cash: expected, counted_cash: counted } });
 
   return updated;
 }
 
 // ---------------------------------------------------------------------------
-// OWNER-GATED CALLS — the only functions in this file that require a
-// per-user token. Each one assumes loginWithPin() already ran for the
-// currently-logged-in owner; if the token's missing or was rejected, this
-// throws AuthRequiredError('user') and the caller should re-prompt the PIN.
+// Server reads (per-person token; see session.js)
 // ---------------------------------------------------------------------------
 
-export async function submitReturn(payload) {
-  return api('/returns', { method: 'POST', body: payload, mode: 'user' });
-}
+// Empty filters are left out, as they were from a query string.
+const filters = (params = {}) => Object.fromEntries(Object.entries(params).filter(([, v]) => v != null && v !== ''));
 
-export async function fetchTodayReconciliation(date) {
-  return api(`/reconciliation/today?date=${date}`, { mode: 'user' });
-}
+export const fetchDashboard = (period) => rpc('pos_dashboard', { period });
+export const fetchStock = (includeArchived = false) => rpc('pos_stock', { include_archived: includeArchived });
+export const fetchCategories = () => rpc('pos_categories');
+export const fetchNextSku = (categoryId) => rpc('pos_next_sku', { category_id: categoryId });
+export const createProduct = (payload) => rpc('pos_product_create', payload);
+export const updateProduct = (id, payload) => rpc('pos_product_update', { ...payload, id });
 
-export async function submitReconciliation(payload) {
-  return api('/reconciliation', { method: 'POST', body: payload, mode: 'user' });
-}
+export const fetchMaterialRequests = (params) => rpc('pos_material_requests', filters(params));
+export const fulfillMaterialRequest = (id) => rpc('pos_material_request_fulfill', { id });
 
-export async function fetchMovers(days = 7) {
-  return api(`/analytics/movers?days=${days}`, { mode: 'user' });
-}
+export const fetchSales = (params) => rpc('pos_sales', filters(params));
+export const fetchShifts = (params) => rpc('pos_shifts', filters(params));
+export const fetchShift = (id) => rpc('pos_shift', { id });
+export const submitReturn = (payload) => rpc('pos_return_create', payload);
 
-export async function fetchDashboard(period = 'today') {
-  return api(`/dashboard?period=${period}`, { mode: 'user' });
-}
+// Voids need two owners (voids.js).
+export const requestVoid = (saleId, reason) => rpc('pos_void_request_create', { sale_id: saleId, reason });
+export const fetchVoidRequests = () => rpc('pos_void_requests');
+export const fetchVoidRequest = (id) => rpc('pos_void_request', { id });
+export const approveVoid = (id) => rpc('pos_void_approve', { id });
+export const approveVoidHere = (id, payload) => rpc('pos_void_approve_here', { ...payload, id });
+export const rejectVoid = (id) => rpc('pos_void_reject', { id });
 
-export async function fetchStock(includeArchived = false) {
-  return api(`/inventory/stock?include_archived=${includeArchived ? 1 : 0}`, { mode: 'user' });
-}
+export const fetchCustomers = (params) => rpc('pos_customers', filters(params));
+export const fetchCustomer = (id) => rpc('pos_customer', { id });
 
-// Add New Item — creates a brand new catalog entry.
-export async function createProduct(payload) {
-  return api('/products', { method: 'POST', body: payload, mode: 'user' });
-}
-
-// Suggests a ready-made item code for a given category, so nobody has to
-// invent one on the Add New Item screen.
-export async function fetchNextSku(category_id) {
-  return api(`/products/next-sku?category_id=${encodeURIComponent(category_id)}`, { mode: 'user' });
-}
-
-export async function updateProduct(id, payload) {
-  return api(`/products/${id}`, { method: 'PATCH', body: payload, mode: 'user' });
-}
-
-// A direct, Sanctum-based category list. Used as a backup by Add New Item
-// whenever this device's own offline copy of the categories is empty.
-export async function fetchCategories() {
-  return api('/categories', { mode: 'user' });
-}
-
-// Material Pick Lists — viewing/fulfilling only. Creation is
-// submitMaterialRequest() above, which never touches this mode:'user' path.
-export async function fetchMaterialRequests(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  return api(`/material-requests${qs ? `?${qs}` : ''}`, { mode: 'user' });
-}
-
-export async function fulfillMaterialRequest(id) {
-  return api(`/material-requests/${id}/fulfill`, { method: 'PATCH', mode: 'user' });
-}
-
-// Supplier Orders
-export async function fetchSuppliers() {
-  return api('/suppliers', { mode: 'user' });
-}
-
-export async function createSupplier(payload) {
-  return api('/suppliers', { method: 'POST', body: payload, mode: 'user' });
-}
-
-export async function fetchPurchaseOrders(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  return api(`/purchase-orders${qs ? `?${qs}` : ''}`, { mode: 'user' });
-}
-
-export async function createPurchaseOrder(payload) {
-  return api('/purchase-orders', { method: 'POST', body: payload, mode: 'user' });
-}
-
-export async function receivePurchaseOrder(id) {
-  return api(`/purchase-orders/${id}/receive`, { method: 'PATCH', mode: 'user' });
-}
-
-export async function submitCycleCount(payload) {
-  return api('/cycle-counts', { method: 'POST', body: payload, mode: 'user' });
-}
-
-export async function fetchActivityLog(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  return api(`/activity${qs ? `?${qs}` : ''}`, { mode: 'user' });
-}
-
-export async function fetchSales(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  return api(`/sales${qs ? `?${qs}` : ''}`, { mode: 'user' });
-}
-
-export async function voidSaleAsAdmin(saleId, reason) {
-  return api(`/sales/${saleId}/void`, { method: 'POST', body: { reason }, mode: 'user' });
-}
-
-export async function fetchShifts(params = {}) {
-  const qs = new URLSearchParams(params).toString();
-  return api(`/shifts${qs ? `?${qs}` : ''}`, { mode: 'user' });
-}
-
-export async function fetchUsers() {
-  return api('/users', { mode: 'user' });
-}
-
-export async function createUser(payload) {
-  return api('/users', { method: 'POST', body: payload, mode: 'user' });
-}
-
-export async function updateUser(id, payload) {
-  return api(`/users/${id}`, { method: 'PATCH', body: payload, mode: 'user' });
-}
-
-// Two-factor login setup for an owner account (Google Authenticator).
-export async function setupTwoFactor(id) {
-  return api(`/users/${id}/2fa/setup`, { method: 'POST', mode: 'user' });
-}
-
-export async function verifyTwoFactor(id, code) {
-  return api(`/users/${id}/2fa/verify`, { method: 'POST', body: { code }, mode: 'user' });
-}
-
-export async function disableTwoFactor(id) {
-  return api(`/users/${id}/2fa/disable`, { method: 'POST', mode: 'user' });
-}
+// Only active accounts unless includeArchived.
+export const fetchUsers = (includeArchived = false) => rpc('pos_users', { include_archived: includeArchived });
+export const createUser = (payload) => rpc('pos_user_create', payload);
+export const updateUser = (id, payload) => rpc('pos_user_update', { ...payload, id });
+export const setupTwoFactor = (id) => rpc('pos_two_factor_setup', { id });
+export const verifyTwoFactor = (id, code) => rpc('pos_two_factor_verify', { id, code });
+export const disableTwoFactor = (id) => rpc('pos_two_factor_disable', { id });
 
 // ---------------------------------------------------------------------------
-// CONNECTIVITY
+// Connectivity, outbox push, catalog pull
 // ---------------------------------------------------------------------------
 
-let isOnline = false;
-
-async function checkRealConnectivity() {
+// Whether Supabase answers at all. A project that's paused or failing (5xx)
+// counts as offline; a network failure throws.
+async function isServerReachable() {
+  if (!serverConfigured) return false;
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 4000);
-    const res = await fetch(`${API_BASE.replace(/\/api$/, '')}/up`, { signal: controller.signal });
-    clearTimeout(timeout);
-    return res.ok;
+    const res = await fetch(`${SUPABASE_URL}/rest/v1/rpc/pos_ping`, {
+      method: 'POST', headers: HEADERS, body: '{}', signal: AbortSignal.timeout(4000),
+    });
+    return res.status < 500;
   } catch {
     return false;
   }
 }
 
-export function startConnectivityWatcher(onChange) {
-  const recheck = async () => {
-    const nowOnline = await checkRealConnectivity();
-    if (nowOnline !== isOnline) {
-      isOnline = nowOnline;
-      onChange(isOnline);
-    }
-  };
-
-  window.addEventListener('online', recheck);
-  window.addEventListener('offline', () => { isOnline = false; onChange(false); });
-  const interval = setInterval(recheck, 20_000);
-  recheck();
-
-  return () => {
-    window.removeEventListener('online', recheck);
-    clearInterval(interval);
-  };
-}
-
-// ---------------------------------------------------------------------------
-// OUTBOX FLUSH — terminal-key authenticated. Runs the same whether zero
-// staff or three staff have ever logged into this device today.
-// ---------------------------------------------------------------------------
-
 const MAX_RETRY_COUNT = 8;
 const BASE_DELAY_MS = 2000;
 const MAX_DELAY_MS = 5 * 60_000;
 const BATCH_SIZE = 50;
+// Records others point at go first: a sale needs its shift and customer, and
+// a pick list shows its sale's details once the sale is there.
+const PUSH_ORDER = { customer: 0, shift_log: 1, sale: 2, material_request: 3 };
 
 function backoffDelay(retryCount) {
   const cap = Math.min(BASE_DELAY_MS * 2 ** retryCount, MAX_DELAY_MS);
   return cap / 2 + Math.random() * (cap / 2);
 }
 
-let flushing = false;
+// Gives items the outbox already gave up on another chance (Sync now).
+export async function retryFailedOutbox() {
+  return db.outbox_queue.where('status').equals('failed').modify({ status: 'pending', retry_count: 0, last_attempt_at: null });
+}
 
-export async function flushOutbox({ onNeedsProvisioning } = {}) {
-  if (flushing) return;
-  flushing = true;
-  try {
-    const pending = await db.outbox_queue.where('status').equals('pending').sortBy('created_at');
+// One push at a time. Asking while one runs waits for it, plus one more
+// round for anything saved meanwhile, so "send what's waiting, then read the
+// server" (Credit, Sales, Dashboard) always includes the sale just made.
+let flushing = null;
+let flushAgain = false;
 
-    const due = pending.filter((item) => {
-      const readyAt = item.last_attempt_at
-        ? new Date(item.last_attempt_at).getTime() + backoffDelay(item.retry_count)
-        : 0;
-      return Date.now() >= readyAt;
-    });
-
-    for (let i = 0; i < due.length; i += BATCH_SIZE) {
-      const chunk = due.slice(i, i + BATCH_SIZE);
-
-      let results;
-      try {
-        const response = await api('/sync/push', {
-          method: 'POST', mode: 'terminal',
-          body: { items: chunk.map((item) => ({ id: item.id, entity_type: item.entity_type, payload: item.payload })) }
-        });
-        results = response.results;
-      } catch (err) {
-        if (err instanceof AuthRequiredError && err.kind === 'terminal') {
-          onNeedsProvisioning?.(); // this device was never set up with a terminal key — a real setup gap, not a transient failure
-          return;
-        }
-        continue; // network failure — leave the chunk pending, backoff applies per-item next attempt
-      }
-
-      for (const item of chunk) {
-        const result = results[item.id];
-        if (result?.ok) {
-          await db.outbox_queue.delete(item.id);
-          continue;
-        }
-
-        const retry_count = item.retry_count + 1;
-        await db.outbox_queue.update(item.id, {
-          retry_count, last_attempt_at: new Date().toISOString(),
-          status: retry_count >= MAX_RETRY_COUNT ? 'failed' : 'pending'
-        });
-      }
+export function flushOutbox(options = {}) {
+  if (flushing) {
+    flushAgain = true;
+    return flushing;
+  }
+  flushing = (async () => {
+    try {
+      do {
+        flushAgain = false;
+        await pushPending(options);
+      } while (flushAgain);
+    } finally {
+      flushing = null;
     }
-  } finally {
-    flushing = false;
+  })();
+  return flushing;
+}
+
+async function pushPending({ onNeedsProvisioning } = {}) {
+  const pending = await db.outbox_queue.where('status').equals('pending').toArray();
+  const due = pending
+    .filter((item) => !item.last_attempt_at || Date.now() >= new Date(item.last_attempt_at).getTime() + backoffDelay(item.retry_count))
+    .sort((a, b) => (PUSH_ORDER[a.entity_type] ?? 2) - (PUSH_ORDER[b.entity_type] ?? 2) || a.created_at.localeCompare(b.created_at));
+
+  for (let i = 0; i < due.length; i += BATCH_SIZE) {
+    const chunk = due.slice(i, i + BATCH_SIZE);
+
+    let results;
+    try {
+      ({ results } = await rpc('pos_sync_push', {
+        items: chunk.map(({ id, entity_type, payload }) => ({ id, entity_type, payload })),
+      }, { mode: 'terminal' }));
+    } catch (err) {
+      if (err instanceof AuthRequiredError) {
+        onNeedsProvisioning?.();
+        return;
+      }
+      console.warn('[sync] push failed, will retry:', err.message);
+      continue;
+    }
+
+    for (const item of chunk) {
+      const result = results[item.id];
+      if (result?.ok) {
+        await db.outbox_queue.delete(item.id);
+        continue;
+      }
+      console.warn(`[sync] server rejected a "${item.entity_type}" item:`, result?.error ?? 'no error message', item.payload);
+      const retry_count = item.retry_count + 1;
+      await db.outbox_queue.update(item.id, {
+        retry_count, last_attempt_at: nowIso(),
+        status: retry_count >= MAX_RETRY_COUNT ? 'failed' : 'pending',
+      });
+    }
   }
 }
 
-// ---------------------------------------------------------------------------
-// CATALOG PULL — terminal-key authenticated, same reasoning as the flush.
-// This stays incremental (only asks for what changed since last time) so
-// the automatic background checks stay light. forceFullSync() below is
-// the "start over completely" version used by the Sync Now button.
-// ---------------------------------------------------------------------------
+const CATALOG_TABLES = ['products', 'categories', 'users', 'stock_batches', 'customers'];
 
-export async function pullCatalog() {
-  const since = await getSyncMeta('catalog_pulled_at', '1970-01-01T00:00:00Z');
+// Incremental: only asks for what changed since the last pull. `fresh`
+// replaces this device's copy entirely (Sync now), which also drops anything
+// stale that an incremental pull can't fix.
+export async function pullCatalog({ fresh = false } = {}) {
+  const since = fresh ? '1970-01-01T00:00:00Z' : await getSyncMeta('catalog_pulled_at', '1970-01-01T00:00:00Z');
 
   let data;
   try {
-    data = await api(`/catalog?since=${encodeURIComponent(since)}`, { mode: 'terminal' });
+    data = await rpc('pos_catalog', { since }, { mode: 'terminal' });
   } catch (err) {
     if (err instanceof AuthRequiredError) return false;
     throw err;
   }
 
-  await db.transaction('rw', db.products, db.categories, db.users, db.stock_batches, async () => {
-    if (data.products?.length) await db.products.bulkPut(data.products);
-    if (data.categories?.length) await db.categories.bulkPut(data.categories);
-    if (data.users?.length) await db.users.bulkPut(data.users);
-    if (data.stock_batches?.length) await db.stock_batches.bulkPut(data.stock_batches);
+  await db.transaction('rw', [...CATALOG_TABLES.map((t) => db[t]), db.sales], async () => {
+    for (const table of CATALOG_TABLES) {
+      if (fresh) await db[table].clear();
+      if (data[table]?.length) await db[table].bulkPut(data[table]);
+    }
+    // Voids are approved on the server. Marking this device's copy keeps a
+    // voided cash sale out of the drawer count at the end of the shift.
+    if (data.voided_sales?.length) await db.sales.where('id').anyOf(data.voided_sales).modify({ status: 'voided' });
   });
 
   await setSyncMeta('catalog_pulled_at', data.server_time);
   return true;
 }
 
-// Resets this device's sync cursor all the way back, then pulls again —
-// this makes the next pull ask the server for everything from scratch
-// instead of only "what changed since last time". This is what the Sync
-// Now button uses: if this device's own copy is missing something (an
-// item, a staff member, a whole category) for any reason, a normal
-// incremental pull can't fix that on its own, but starting over always
-// will, since it isn't relying on any assumption about what already
-// synced correctly before.
-export async function forceFullSync() {
-  await setSyncMeta('catalog_pulled_at', '1970-01-01T00:00:00Z');
-  return pullCatalog();
-}
-
-// ---------------------------------------------------------------------------
-// BACKGROUND LOOP
-// ---------------------------------------------------------------------------
-
-let stopWatcher = null;
-let flushInterval = null;
-let pullInterval = null;
+export const forceFullSync = () => pullCatalog({ fresh: true });
 
 export function startSyncWorker({ onStatusChange, onNeedsProvisioning } = {}) {
-  stopWatcher = startConnectivityWatcher(async (online) => {
-    onStatusChange?.(online ? 'online' : 'offline');
+  let online = null;
+
+  const recheck = async () => {
+    const now = await isServerReachable();
+    if (now === online) return;
+    online = now;
+    onStatusChange?.(online);
     if (online) {
       await flushOutbox({ onNeedsProvisioning });
-      await pullCatalog();
+      await pullCatalog().catch(() => {});
     }
-  });
+  };
 
-  flushInterval = setInterval(() => flushOutbox({ onNeedsProvisioning }), 15_000);
-  pullInterval = setInterval(pullCatalog, 60_000);
-}
+  window.addEventListener('online', recheck);
+  window.addEventListener('offline', () => { online = false; onStatusChange?.(false); });
+  setInterval(recheck, 20_000);
+  recheck();
 
-export function stopSyncWorker() {
-  stopWatcher?.();
-  clearInterval(flushInterval);
-  clearInterval(pullInterval);
+  setInterval(() => flushOutbox({ onNeedsProvisioning }), 15_000);
+  setInterval(() => pullCatalog().catch(() => {}), 60_000);
 }

@@ -3,620 +3,713 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Caidic Hardware POS</title>
+<title>RRC Merchandise POS</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <link rel="stylesheet" href="/src/style.css">
 </head>
 <body>
 
-<!-- ===================== LOGIN ===================== -->
-<div id="loginScreen">
+<!-- ===================== SIGN IN ===================== -->
+<main id="loginScreen" class="login">
   <div class="login-card">
-    <div class="hazard-edge"></div>
-    <div class="login-body">
-      <div class="login-brand">
-        <div class="name">Caidic Hardware</div>
-        <div class="sub">Tap your name, then enter your PIN</div>
-      </div>
+    <div class="login-brand">
+      <img src="/favicon.svg" alt="" class="brand-mark" width="44" height="44">
+      <h1>RRC Merchandise</h1>
+      <p id="loginHint">Tap your name to start your shift</p>
+    </div>
 
+    <div id="staffPicker">
       <div id="staffGrid" class="staff-grid"></div>
-      <div style="text-align:center; margin-top:14px;">
-        <button type="button" id="syncNowLoginBtn" class="pin-back" style="margin:0;">Sync Now</button>
-      </div>
+      <button type="button" id="syncNowLoginBtn" class="btn btn-ghost btn-sm login-sync"><span data-icon="sync"></span>Sync staff list</button>
+    </div>
 
-      <div id="pinPad" class="pin-pad-wrap" hidden>
-        <button type="button" class="pin-back" id="pinBack">&larr; Not you?</button>
-        <div class="pin-selected">
-          <span class="av" id="pinAv"></span>
-          <span class="nm" id="pinName"></span>
-        </div>
-        <p id="pinPadTitle" class="placeholder-note" style="text-align:center; margin:-10px 0 14px;" hidden></p>
-        <div class="pin-dots"></div>
-        <div class="keypad" id="keypad"></div>
-        <div class="login-error" id="loginError"></div>
-      </div>
+    <div id="pinPad" class="pin-pad" hidden>
+      <button type="button" class="btn btn-ghost btn-sm pin-back" id="pinBack"><span data-icon="back"></span>Not you?</button>
+      <span class="avatar avatar-lg" id="pinAv"></span>
+      <p class="pin-name" id="pinName"></p>
+      <p class="pin-prompt" id="pinPrompt"></p>
+      <div class="pin-dots" id="pinDots"></div>
+      <div class="keypad" id="keypad"></div>
+      <p class="pin-error" id="loginError" role="alert"></p>
     </div>
   </div>
-</div>
+</main>
 
 <!-- ===================== APP SHELL ===================== -->
-<div id="appShell" hidden>
+<div id="appShell" class="shell" hidden>
   <aside class="sidebar">
-    <div class="brand">Caidic Hardware</div>
-    <nav class="nav-items" id="navItems"></nav>
+    <div class="brand">
+      <img src="/favicon.svg" alt="" class="brand-mark" width="32" height="32">
+      <div class="brand-text"><strong>RRC</strong><span>Merchandise</span></div>
+    </div>
+    <nav id="navItems" class="nav" aria-label="Main"></nav>
     <div class="sidebar-foot">
-      <div class="user-card">
-        <span class="av" id="sideAv"></span>
-        <div>
-          <div class="nm" id="sideName"></div>
-          <div class="rl" id="sideRole"></div>
-        </div>
+      <div class="user-chip">
+        <span class="avatar" id="sideAv"></span>
+        <div class="user-meta"><div class="user-name" id="sideName"></div><div class="user-role" id="sideShift"></div></div>
       </div>
-      <button id="logoutBtn" type="button">Log out</button>
+      <button type="button" id="logoutBtn" class="btn btn-ghost btn-block" title="Sign out"><span data-icon="logout"></span><span class="nav-label">Sign out</span></button>
     </div>
   </aside>
 
-  <div class="app-main">
-    <div class="hazard-edge"></div>
-    <header class="app-header">
-      <div style="display:flex; align-items:center; gap:8px;">
-        <h1 id="viewTitle">POS Billing</h1>
-        <span class="help-wrap" id="pageHelpWrap" hidden>
-          <button type="button" class="help-btn" aria-label="What is this page?">?</button>
-          <div class="help-pop" id="pageHelpPop"></div>
+  <div class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <h1 id="viewTitle"></h1>
+        <span class="tip">
+          <button type="button" class="icon-btn" aria-label="About this page"><span data-icon="help"></span></button>
+          <span class="tip-body" id="pageHelpPop" role="tooltip"></span>
         </span>
       </div>
-      <div class="header-status-group">
-        <button type="button" id="syncNowBtn">Sync Now</button>
-        <button id="statusPill" type="button"><span class="dot"></span><span id="statusLabel">Checking...</span></button>
-        <span class="help-wrap">
-          <button type="button" class="help-btn" aria-label="What does this mean?">?</button>
-          <div class="help-pop">This shows if this device is connected to the internet.<br><br><b>Active</b> means connected. Everything saves to the cloud right away.<br><b>Inactive</b> means no internet right now. You can still make sales. They will upload automatically once the internet is back.</div>
+      <div class="topbar-actions">
+        <span class="tip">
+          <span id="statusPill" class="status-pill" tabindex="0"><span class="dot"></span><span id="statusLabel">Checking…</span></span>
+          <span class="tip-body tip-right" role="tooltip"><b>Online:</b> sales save to the cloud right away.<br><b>Offline:</b> keep selling. Sales upload on their own once the internet is back.</span>
         </span>
+        <button type="button" id="syncNowBtn" class="btn btn-sm"><span data-icon="sync"></span>Sync now</button>
       </div>
     </header>
 
-    <div class="view-body">
+    <!-- Owners only: a void waiting for their yes (voids.js) -->
+    <div id="voidBanner" class="void-banner" role="status" hidden>
+      <span data-icon="alert" class="void-banner-icon"></span>
+      <p id="voidBannerText"></p>
+      <button type="button" id="voidBannerBtn" class="btn btn-sm btn-primary">Review</button>
+    </div>
 
-      <!-- ---------- DASHBOARD (manager+owner) ---------- -->
-      <div id="viewDashboard" class="view" hidden>
-        <div class="dash-period" id="dashPeriod">
-          <button type="button" class="period-btn active" data-period="today">Today</button>
-          <button type="button" class="period-btn" data-period="week">This Week</button>
-          <button type="button" class="period-btn" data-period="month">This Month</button>
-          <button type="button" class="period-btn" data-period="year">This Year</button>
+    <div class="content" id="content">
+
+      <!-- Dashboard -->
+      <section id="viewDashboard" class="view" hidden>
+        <div class="page-toolbar">
+          <div class="segmented" id="dashPeriod">
+            <button type="button" data-period="today" class="active">Today</button>
+            <button type="button" data-period="week">This week</button>
+            <button type="button" data-period="month">This month</button>
+            <button type="button" data-period="year">This year</button>
+          </div>
+        </div>
+        <div class="kpi-grid">
+          <div class="card kpi"><span class="kpi-label">Sales</span><span class="kpi-value" id="dashSales">—</span><span class="kpi-sub" id="dashSalesSub"></span></div>
+          <div class="card kpi"><span class="kpi-label">Customers owe you</span><span class="kpi-value" id="dashOwed">—</span><span class="kpi-sub">unpaid credit (utang)</span></div>
+          <div class="card kpi"><span class="kpi-label">Stock value</span><span class="kpi-value" id="dashStock">—</span><span class="kpi-sub" id="dashStockSub"></span></div>
+          <div class="card kpi" id="dashLowCard"><span class="kpi-label">Low stock</span><span class="kpi-value" id="dashLow">—</span><span class="kpi-sub">items to reorder</span></div>
+        </div>
+        <div class="grid-3">
+          <div class="card">
+            <div class="card-head"><h2>On shift now</h2></div>
+            <ul class="plain-list" id="dashOnShift"></ul>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Best sellers</h2></div>
+            <ul class="plain-list" id="dashTop"></ul>
+          </div>
+          <div class="card">
+            <div class="card-head"><h2>Not selling</h2><span class="muted">no sales in 30 days</span></div>
+            <ul class="plain-list" id="dashSlow"></ul>
+          </div>
+        </div>
+      </section>
+
+      <!-- Sell -->
+      <section id="viewBilling" class="view billing">
+        <div class="catalog">
+          <div class="catalog-head">
+            <div class="search search-lg picker picker-float">
+              <span data-icon="search" class="icon-lead"></span>
+              <input id="searchInput" class="input" type="search" placeholder="Scan a barcode, or search by name or SKU" autocomplete="off">
+              <div id="searchResults" class="picker-results"></div>
+            </div>
+            <div id="categoryChips" class="chips"></div>
+          </div>
+          <div id="grid" class="product-grid"></div>
         </div>
 
-        <div class="dash-grid">
-          <div class="card dash-card">
-            <h2>Sales Activity</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashRevenue">&mdash;</span><span class="dash-lbl">revenue</span></div>
+        <aside class="card order">
+          <div class="order-head"><h2>Current order</h2><span id="orderCount" class="muted"></span></div>
+          <div id="lines" class="order-lines"></div>
+          <div class="order-foot">
+            <div class="order-total"><span>Total</span><strong id="grandTotal">₱0.00</strong></div>
+            <button id="chargeBtn" type="button" class="btn btn-primary btn-lg btn-block" disabled>Charge</button>
+            <button id="sendToPickListBtn" type="button" class="btn btn-block" disabled>Send to pick list</button>
           </div>
+        </aside>
+      </section>
 
-          <div class="card dash-card">
-            <h2>Sales Orders</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashOrderCount">&mdash;</span><span class="dash-lbl">orders this period</span></div>
+      <!-- Credit (utang) -->
+      <section id="viewCredit" class="view stack" hidden>
+        <div class="stat-row">
+          <div class="stat"><span class="stat-label">Customers owe you</span><span class="stat-value" id="creditTotal">—</span></div>
+          <div class="stat"><span class="stat-label">Customers with unpaid credit</span><span class="stat-value" id="creditCount">—</span></div>
+        </div>
+        <div class="card">
+          <div class="toolbar">
+            <div class="search"><span data-icon="search" class="icon-lead"></span><input id="creditSearch" class="input" type="search" placeholder="Search name or phone"></div>
+            <label class="toggle"><input type="checkbox" id="creditShowPaid"> Show fully paid</label>
           </div>
-
-          <div class="card dash-card">
-            <h2>Active Items</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashActiveSkus">&mdash;</span><span class="dash-lbl">active SKUs</span></div>
-          </div>
-
-          <div class="card dash-card">
-            <h2>Inventory Summary</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashGoodUnits">&mdash;</span><span class="dash-lbl">units on hand</span></div>
-            <div class="dash-stat"><span class="dash-num" id="dashRetailValue">&mdash;</span><span class="dash-lbl">retail value</span></div>
-          </div>
-
-          <div class="card dash-card">
-            <h2>Purchase Orders</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashPendingPOs">&mdash;</span><span class="dash-lbl">pending</span></div>
-          </div>
-
-          <div class="card dash-card">
-            <h2>Stock Alerts</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashLowStockCount">&mdash;</span><span class="dash-lbl">items at or below reorder level</span></div>
-          </div>
-
-          <div class="card dash-card">
-            <h2>Register Status</h2>
-            <div class="dash-stat"><span class="dash-num" id="dashRegisterStatus">&mdash;</span></div>
-            <span class="dash-lbl" id="dashRegisterDetail"></span>
-          </div>
-
-          <div class="card dash-card dash-wide">
-            <h2>Top Selling Items</h2>
-            <table class="data-table" id="dashTopSelling">
-              <thead><tr><th>Product</th><th>Units sold</th></tr></thead>
+          <div class="table-wrap">
+            <table class="table" id="creditTable">
+              <thead><tr><th>Customer</th><th>Phone</th><th>Last credit sale</th><th class="num">Owes</th><th></th></tr></thead>
               <tbody></tbody>
             </table>
           </div>
         </div>
-      </div>
+      </section>
 
-      <!-- ---------- BILLING ---------- -->
-      <div id="viewBilling" class="view">
-        <div class="billing-grid">
-          <div style="display:flex; flex-direction:column; gap:18px;">
-            <div class="card">
-              <h2>Scan or search</h2>
-              <div class="search-box">
-                <input id="searchInput" type="text" placeholder="Scan a barcode, or type a name..." autocomplete="off">
-              </div>
-              <div id="searchResults"></div>
-              <h2>Items</h2>
-              <div id="grid" class="grid"></div>
+      <!-- Pick lists: what the stockroom gets ready. Every sale lands here. -->
+      <section id="viewMaterialRequests" class="view stack" hidden>
+        <div class="card" id="mrListCard">
+          <div class="card-head">
+            <h2>To pick up <span class="muted" id="mrCount"></span></h2>
+            <label class="toggle"><input type="checkbox" id="mrShowAll"> Show finished lists</label>
+          </div>
+          <div class="table-wrap">
+            <table class="table table-anim" id="materialRequestsTable">
+              <thead><tr><th>Time</th><th>For</th><th>Items</th><th>Note</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="card narrow">
+          <div class="card-head"><h2>New pick list</h2><span class="muted">Not charged: for big orders or deliveries</span></div>
+          <div class="field">
+            <label for="mrProductSearch">Items</label>
+            <div class="search picker">
+              <span data-icon="search" class="icon-lead"></span>
+              <input id="mrProductSearch" class="input" type="search" placeholder="Search to add an item" autocomplete="off">
+              <div id="mrProductResults" class="picker-results"></div>
             </div>
           </div>
+          <div id="mrItemsList" class="item-list"></div>
+          <div class="field">
+            <label for="mrNotes">Note <span class="optional">optional</span></label>
+            <textarea id="mrNotes" class="input" rows="2" placeholder="e.g. customer job, or running low"></textarea>
+          </div>
+          <div class="form-foot">
+            <p id="mrStatus" class="form-status"></p>
+            <button type="button" class="btn btn-primary" id="mrSubmitBtn">Send to stockroom</button>
+          </div>
+        </div>
+      </section>
 
-          <div class="card" id="ticketCard">
-            <div class="torn-edge"></div>
-            <div class="ticket-inner">
-              <div class="ticket-head"><span class="num">Current order</span></div>
-              <div id="lines"></div>
-              <div class="totals">
-                <div class="row"><span>Subtotal</span><span id="subtotal">&#8369;0.00</span></div>
-                <div class="row"><span>VAT (12%)</span><span id="vat">&#8369;0.00</span></div>
-                <div class="row grand"><span>Total</span><span id="grandTotal">&#8369;0.00</span></div>
-              </div>
-              <div class="ticket-actions">
-                <button id="chargeBtn" type="button" disabled>Charge (cash)</button>
-              </div>
+      <!-- Stock -->
+      <section id="viewStock" class="view stack" hidden>
+        <div class="stat-row stat-row-3">
+          <div class="stat"><span class="stat-label">In the store</span><span class="stat-value" id="stockStoreValue">—</span></div>
+          <div class="stat"><span class="stat-label">In the warehouse</span><span class="stat-value" id="stockWarehouseValue">—</span></div>
+          <div class="stat"><span class="stat-label">Total stock value</span><span class="stat-value" id="stockTotalValue">—</span></div>
+        </div>
+        <div class="card">
+          <div class="toolbar">
+            <div class="search"><span data-icon="search" class="icon-lead"></span><input id="stockSearch" class="input" type="search" placeholder="Search by name or SKU"></div>
+            <select id="stockCategory" class="input input-auto" aria-label="Category"></select>
+            <label class="toggle"><input type="checkbox" id="stockLowOnly"> Low stock only</label>
+            <label class="toggle"><input type="checkbox" id="stockArchivedToggle"> Show archived</label>
+            <div class="toolbar-end">
+              <button type="button" class="btn" id="priceListPrintBtn"><span data-icon="print"></span>Print price list</button>
+              <button type="button" class="btn" id="receiveOpenBtn"><span data-icon="truck"></span>Add delivery</button>
+              <button type="button" class="btn btn-primary" id="addItemOpenBtn"><span data-icon="plus"></span>New item</button>
             </div>
           </div>
-        </div>
-      </div>
-
-      <!-- ---------- MATERIAL PICK LISTS (all roles — create is open to
-           everyone; the review/fulfill table below only shows for
-           manager/owner, toggled in inventory.js) ---------- -->
-      <div id="viewMaterialRequests" class="view" hidden>
-        <div class="card">
-          <h2>New pick list</h2>
-          <div class="form-row">
-            <label>Item</label>
-            <input id="mrProductSearch" type="text" placeholder="Search by name or SKU...">
-            <div id="mrProductResults"></div>
+          <div class="table-wrap">
+            <table class="table" id="stockTable">
+              <thead><tr><th>Item</th><th class="num">Price</th><th class="num">Store</th><th class="num">Warehouse</th><th class="num">Value</th><th>Status</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
           </div>
-          <div id="mrItemsList"></div>
-          <div class="form-row"><label>Note (optional)</label><textarea id="mrNotes" rows="2" placeholder="e.g. customer job, or running low"></textarea></div>
-          <p id="mrStatus" class="form-status"></p>
-          <button type="button" class="btn-primary" id="mrSubmitBtn">Send to inventory</button>
         </div>
+      </section>
 
-        <div class="card" id="mrListCard" hidden>
-          <div class="filter-row">
-            <h2 style="margin:0;">Submitted lists</h2>
-            <label class="archive-toggle"><input type="checkbox" id="mrShowAll"> Show fulfilled too</label>
+      <!-- Sales (order history) -->
+      <section id="viewSales" class="view stack" hidden>
+        <div class="page-toolbar">
+          <div class="segmented" id="salesPeriod">
+            <button type="button" data-period="today" class="active">Today</button>
+            <button type="button" data-period="week">This week</button>
+            <button type="button" data-period="month">This month</button>
           </div>
-          <table class="data-table" id="materialRequestsTable">
-            <thead><tr><th>Time</th><th>Requested by</th><th>Items</th><th>Note</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
         </div>
-      </div>
-      <div id="viewStock" class="view" hidden>
+        <div class="stat-row stat-row-4">
+          <div class="stat"><span class="stat-label">Total sales</span><span class="stat-value" id="salesTotal">—</span></div>
+          <div class="stat"><span class="stat-label">Cash</span><span class="stat-value" id="salesCash">—</span></div>
+          <div class="stat"><span class="stat-label">GCash / PayMaya</span><span class="stat-value" id="salesDigital">—</span></div>
+          <div class="stat"><span class="stat-label">On credit</span><span class="stat-value" id="salesCredit">—</span></div>
+        </div>
         <div class="card">
-          <div class="filter-row">
-            <input id="stockSearch" type="text" placeholder="Search by name or SKU...">
-            <label class="archive-toggle"><input type="checkbox" id="stockArchivedToggle"> Show archived</label>
-            <button type="button" class="btn-secondary" id="addItemOpenBtn">+ Add New Item</button>
-            <button type="button" class="btn-primary" id="receiveOpenBtn">+ Receive Stock</button>
+          <div class="card-head"><h2>Sales</h2><span class="muted">Tap a sale to see it. A void needs two owners to agree.</span></div>
+          <div class="table-wrap">
+            <table class="table table-anim" id="salesTable">
+              <thead><tr><th>Time</th><th>Items</th><th>Payment</th><th>Staff</th><th class="num">Total</th></tr></thead>
+              <tbody></tbody>
+            </table>
           </div>
-          <table class="data-table" id="stockTable">
-            <thead><tr><th>Item</th><th>Store</th><th>Warehouse</th><th>Damaged</th><th>Level</th><th>Status</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
         </div>
-      </div>
+      </section>
 
-      <!-- ---------- RECONCILIATION (owner only) ---------- -->
-      <div id="viewReconciliation" class="view" hidden>
-        <div class="card">
-          <h2>Today so far (system totals)</h2>
-          <div class="counter-row">
-            <div class="counter-box"><span class="lbl">Items out</span><span class="val" id="recSystemOut">-</span></div>
-            <div class="counter-box"><span class="lbl">Items in</span><span class="val" id="recSystemIn">-</span></div>
-          </div>
-          <h2>Physical count</h2>
-          <div class="form-row"><label>Physical items out (receipts/slips)</label><input id="recPhysicalOut" type="number" step="0.001"></div>
-          <div class="form-row"><label>Physical items in (deliveries/returns received)</label><input id="recPhysicalIn" type="number" step="0.001"></div>
-          <div class="form-row"><label>Notes (optional)</label><textarea id="recNotes" rows="2"></textarea></div>
-          <button type="button" class="btn-primary" id="recSubmitBtn">Submit reconciliation</button>
-          <div id="recStatus" class="form-status"></div>
-        </div>
-      </div>
-
-      <!-- ---------- SUPPLIER ORDERS (manager+owner) ---------- -->
-      <div id="viewPurchaseOrders" class="view" hidden>
-        <div class="card">
-          <div class="filter-row">
-            <button type="button" class="btn-primary" id="poOpenCreateBtn">+ New Purchase Order</button>
-          </div>
-          <table class="data-table" id="purchaseOrdersTable">
-            <thead><tr><th>PO #</th><th>Supplier</th><th>Items</th><th>Status</th><th>Expected</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- PRICE LIST (manager+owner) ---------- -->
-      <div id="viewPriceList" class="view" hidden>
-        <div class="card">
-          <div class="filter-row">
-            <input id="priceListSearch" type="text" placeholder="Search by name or SKU...">
-            <button type="button" class="btn-secondary" id="priceListPrintBtn">Print</button>
-          </div>
-          <p class="placeholder-note">Click a price to edit it.</p>
-          <table class="data-table" id="priceListTable">
-            <thead><tr><th>Item</th><th>Unit</th><th>Price</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- RETURNS (owner only) ---------- -->
-      <div id="viewReturns" class="view" hidden>
-        <div class="card">
-          <h2>Process a return</h2>
-          <div class="form-row">
-            <label>Product</label>
-            <input id="retProductSearch" type="text" placeholder="Search by name or SKU...">
-            <div id="retProductResults"></div>
-            <input type="hidden" id="retProductId">
-          </div>
-          <div class="form-row"><label>Selected item</label><div id="retSelectedProduct" class="selected-chip">None selected</div></div>
-          <div class="form-row"><label>Quantity returned</label><input id="retQuantity" type="number" min="0.001" step="0.001" value="1"></div>
-          <div class="form-row">
-            <label>Condition</label>
-            <div class="radio-row">
-              <label><input type="radio" name="retCondition" value="good" checked> Good, restock</label>
-              <label><input type="radio" name="retCondition" value="damaged"> Damaged, lock</label>
-            </div>
-          </div>
-          <div class="form-row"><label>Receipt Number or Reason (required, this is the proof for the return)</label><textarea id="retReason" rows="2" placeholder="e.g. Receipt #1234, or explain why it's being returned"></textarea></div>
-          <button type="button" class="btn-primary" id="retSubmitBtn">Accept return</button>
-          <div id="retStatus" class="form-status"></div>
-        </div>
-      </div>
-
-      <!-- ---------- VOID (manager+owner) ---------- -->
-      <div id="viewVoid" class="view" hidden>
-        <div class="card">
-          <h2>Voidable Sales</h2>
-          <table class="data-table" id="voidTable">
-            <thead><tr><th>Time</th><th>Cashier</th><th>Total</th><th>Method</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- ANALYTICS / FAST-SLOW MOVERS (owner only) ---------- -->
-      <div id="viewAnalytics" class="view" hidden>
-        <div class="card">
-          <h2>Top 10 fast movers (7 days)</h2>
-          <table class="data-table" id="fastMoversTable">
-            <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-          <h2>Bottom 5 slow movers</h2>
-          <table class="data-table" id="slowMoversTable">
-            <thead><tr><th>Product</th><th>Units sold</th><th>System qty</th><th>Physical count</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- SALES & ORDERS (manager+owner) — the original Shifts
-           screen, relocated here. Same ids (shiftsTable, backToShifts,
-           etc.), same renderShifts()/renderShiftDetail() in admin.js —
-           only the view id and where it lives in the nav changed. ---------- -->
-      <div id="viewSalesOrders" class="view" hidden>
+      <!-- Shifts -->
+      <section id="viewShifts" class="view" hidden>
         <div class="card" id="shiftsListCard">
-          <h2>All shifts</h2>
-          <table class="data-table" id="shiftsTable">
-            <thead><tr><th>Started</th><th>Cashier</th><th>Status</th><th>Opening cash</th><th>Sales total</th><th>Discrepancy</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="card" id="shiftDetailCard" hidden>
-          <h2 id="shiftDetailTitle">Shift sales</h2>
-          <button type="button" class="btn-secondary" id="backToShifts">&larr; All shifts</button>
-          <table class="data-table" id="shiftSalesTable">
-            <thead><tr><th>Time</th><th>Total</th><th>Method</th><th>Status</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- STAFF LOGS (owner only) — one row per staff
-           account, View opens that account's own activity (when they
-           clocked in/out, and everything logged in between, including
-           the IP address it came from), Download saves just their most
-           recent shift as a CSV file. Nothing on this screen is
-           editable — it only ever reads and exports. ---------- -->
-      <div id="viewActivity" class="view" hidden>
-        <div class="card" id="staffLogsListCard">
-          <table class="data-table" id="staffLogsAccountsTable">
-            <thead><tr><th>Account</th><th>Role</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-        <div class="card" id="staffLogsDetailCard" hidden>
-          <h2 id="staffLogsDetailTitle" style="margin-top:0;">Account</h2>
-          <button type="button" class="btn-secondary" id="staffLogsBackBtn">&larr; All accounts</button>
-          <h2>Ins and Out</h2>
-          <table class="data-table" id="staffLogsShiftsTable">
-            <thead><tr><th>In</th><th>Out</th><th>Status</th></tr></thead>
-            <tbody></tbody>
-          </table>
-          <h2>Activity</h2>
-          <table class="data-table" id="staffLogsActivityTable">
-            <thead><tr><th>Date &amp; Time</th><th>Activity</th><th>Entity</th><th>IP Address</th></tr></thead>
-            <tbody></tbody>
-          </table>
-        </div>
-      </div>
-
-      <!-- ---------- STAFF ---------- -->
-      <div id="viewStaff" class="view" hidden>
-        <div class="card">
-          <h2>Add staff</h2>
-          <div class="form-row-inline">
-            <input id="usrName" type="text" placeholder="Full name">
-            <select id="usrRole">
-              <option value="cashier">Cashier</option>
-              <option value="manager">Manager</option>
-              <option value="owner">Owner</option>
-            </select>
-            <input id="usrPin" type="text" inputmode="numeric" placeholder="4-digit PIN">
-            <button type="button" class="btn-primary" id="usrAddBtn">Add</button>
+          <div class="card-head">
+            <h2>Shifts</h2>
+            <select id="shiftStaffFilter" class="input input-auto" aria-label="Staff member"></select>
           </div>
-          <div id="usrStatus" class="form-status"></div>
-          <h2>Staff accounts</h2>
-          <table class="data-table" id="usersTable">
-            <thead><tr><th>Name</th><th>Role</th><th>Status</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <div class="table-wrap">
+            <table class="table table-anim" id="shiftsTable">
+              <thead><tr><th>Staff</th><th>Clocked in</th><th>Clocked out</th><th class="num">Hours</th><th class="num">Sales</th><th class="num">Cash difference</th><th>Status</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
-      </div>
+        <div class="stack" id="shiftDetail" hidden>
+          <div class="card">
+            <div class="card-head">
+              <div class="card-head-start">
+                <button type="button" class="icon-btn" id="shiftBackBtn" aria-label="Back to all shifts"><span data-icon="back"></span></button>
+                <h2 id="shiftTitle"></h2>
+              </div>
+              <button type="button" class="btn btn-sm" id="shiftDownloadBtn"><span data-icon="download"></span>Download</button>
+            </div>
+            <div class="stat-row stat-row-4" id="shiftStats"></div>
+          </div>
+          <div class="card">
+            <div class="card-head">
+              <h2>Timeline</h2>
+              <label class="toggle"><input type="checkbox" id="shiftShowSteps"> Show every step</label>
+            </div>
+            <ol class="timeline" id="shiftTimeline"></ol>
+          </div>
+        </div>
+      </section>
 
-      <!-- ---------- ARCHIVES (manager+owner) — read-only view of what's
-           already archived. No purge, here or anywhere in this app. ---------- -->
-      <div id="viewArchives" class="view" hidden>
+      <!-- Returns -->
+      <section id="viewReturns" class="view" hidden>
+        <div class="card narrow">
+          <div class="card-head"><h2>Accept a return</h2></div>
+          <div class="field">
+            <label for="retProductSearch">Item</label>
+            <div class="search picker">
+              <span data-icon="search" class="icon-lead"></span>
+              <input id="retProductSearch" class="input" type="search" placeholder="Search by name or SKU" autocomplete="off">
+              <div id="retProductResults" class="picker-results"></div>
+            </div>
+            <div id="retSelectedProduct" class="selected" data-empty="No item selected"></div>
+          </div>
+          <div class="field"><label for="retQuantity">Quantity returned</label><input id="retQuantity" class="input" type="number" min="0.001" step="0.001" value="1"></div>
+          <div class="field">
+            <span class="label">Condition</span>
+            <div class="choice-row">
+              <label class="choice"><input type="radio" name="retCondition" value="good" checked><span><strong>Good</strong>Goes back on the shelf</span></label>
+              <label class="choice"><input type="radio" name="retCondition" value="damaged"><span><strong>Damaged</strong>Set aside, not for sale</span></label>
+            </div>
+          </div>
+          <div class="field">
+            <label for="retReason">Proof of purchase</label>
+            <textarea id="retReason" class="input" rows="2" placeholder="Invoice or slip number, or the reason for the return"></textarea>
+          </div>
+          <div class="form-foot">
+            <p id="retStatus" class="form-status"></p>
+            <button type="button" class="btn btn-primary" id="retSubmitBtn">Accept return</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Staff -->
+      <section id="viewStaff" class="view stack" hidden>
         <div class="card">
-          <h2>Archived Items</h2>
-          <table class="data-table" id="archivedItemsTable">
-            <thead><tr><th>Item</th><th>SKU</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <div class="card-head"><h2>Add staff</h2></div>
+          <div class="inline-form">
+            <div class="field"><label for="usrName">Full name</label><input id="usrName" class="input" type="text" autocomplete="off"></div>
+            <div class="field">
+              <label for="usrRole">Role</label>
+              <select id="usrRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
+            </div>
+            <div class="field"><label for="usrPin">User password</label><input id="usrPin" class="input" type="text" inputmode="numeric" autocomplete="off"></div>
+            <button type="button" class="btn btn-primary" id="usrAddBtn">Add</button>
+          </div>
+          <p id="usrStatus" class="form-status"></p>
         </div>
         <div class="card">
-          <h2>Deactivated Staff</h2>
-          <table class="data-table" id="archivedStaffTable">
-            <thead><tr><th>Name</th><th>Role</th><th></th></tr></thead>
-            <tbody></tbody>
-          </table>
+          <div class="card-head">
+            <h2>Staff accounts</h2>
+            <label class="toggle"><input type="checkbox" id="staffShowInactive"> Show deactivated</label>
+          </div>
+          <div class="table-wrap">
+            <table class="table" id="usersTable">
+              <thead><tr><th>Name</th><th>Role</th><th></th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
         </div>
-      </div>
+      </section>
 
     </div>
   </div>
 </div>
 
-<!-- PIN confirm modal — for owner-gated server actions -->
-<div id="pinConfirmOverlay" class="overlay" hidden>
-  <div class="modal">
-    <h3>Confirm your PIN</h3>
-    <p class="sub">This action needs to reach the server. Enter your PIN again to continue.</p>
-    <input id="pinConfirmInput" type="password" inputmode="numeric" placeholder="PIN">
-    <p id="pinConfirmError" class="modal-error" hidden></p>
+<!-- ===================== MODALS ===================== -->
+
+<!-- Checkout. Nothing is recorded until Complete is pressed. -->
+<div id="checkoutOverlay" class="overlay" data-backdrop-close data-guarded hidden>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="checkoutTitle">
+    <div class="modal-head">
+      <h3 id="checkoutTitle">Checkout</h3>
+      <button type="button" class="icon-btn" id="checkoutCloseBtn" data-close aria-label="Close"><span data-icon="close"></span></button>
+    </div>
+    <div id="checkoutLines" class="summary-lines"></div>
+    <div class="summary-total"><span>Total due</span><strong id="checkoutTotal"></strong></div>
+
+    <div class="field">
+      <span class="label">How is the customer paying?</span>
+      <div class="pay-methods" id="payMethods">
+        <button type="button" data-method="cash" class="active">Cash</button>
+        <button type="button" data-method="gcash">GCash / PayMaya</button>
+        <button type="button" data-method="credit">Credit (utang)</button>
+      </div>
+    </div>
+
+    <div id="payCash">
+      <div class="field">
+        <label for="checkoutCash">Cash received</label>
+        <div class="money-input"><span>₱</span><input id="checkoutCash" class="input input-lg" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" data-autofocus></div>
+      </div>
+      <div class="change-row" id="checkoutChangeRow"><span id="checkoutChangeLabel">Change</span><strong id="checkoutChange"></strong></div>
+    </div>
+
+    <div id="payReference" hidden>
+      <div class="field">
+        <label for="checkoutReference">Reference number <span class="optional">optional</span></label>
+        <input id="checkoutReference" class="input" type="text" autocomplete="off" placeholder="From the GCash or PayMaya confirmation">
+      </div>
+    </div>
+
+    <div id="payCredit" hidden>
+      <div class="field">
+        <label for="creditCustomerSearch">Customer</label>
+        <div class="search picker">
+          <span data-icon="search" class="icon-lead"></span>
+          <input id="creditCustomerSearch" class="input" type="search" autocomplete="off" placeholder="Search a name, or type a new customer's name">
+          <div id="creditCustomerResults" class="picker-results"></div>
+        </div>
+        <div id="creditCustomerSelected" class="selected" data-empty="No customer chosen yet"></div>
+      </div>
+      <div class="field" id="newCustomerPhoneField" hidden>
+        <label for="newCustomerPhone">New customer's phone <span class="optional">optional</span></label>
+        <input id="newCustomerPhone" class="input" type="tel" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="creditDown">Paid now in cash <span class="optional">optional</span></label>
+        <div class="money-input"><span>₱</span><input id="creditDown" class="input input-lg" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00"></div>
+      </div>
+      <div class="change-row owe-row"><span>To pay later</span><strong id="creditOwe"></strong></div>
+    </div>
+
+    <p id="checkoutStatus" class="form-status"></p>
+    <div class="modal-actions modal-actions-split">
+      <button type="button" id="checkoutPrintBtn" class="btn btn-lg"><span data-icon="print"></span>Complete &amp; print slip</button>
+      <button type="button" id="checkoutDoneBtn" class="btn btn-primary btn-lg">Complete sale</button>
+    </div>
+  </div>
+</div>
+
+<!-- One sale, from the Sales screen -->
+<div id="saleOverlay" class="overlay" hidden>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="saleTitle">
+    <div class="modal-head">
+      <h3 id="saleTitle">Sale</h3>
+      <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="close"></span></button>
+    </div>
+    <dl class="facts" id="saleFacts"></dl>
+    <div id="saleLines" class="summary-lines"></div>
+    <div class="summary-total"><span>Total</span><strong id="saleTotal"></strong></div>
     <div class="modal-actions">
-      <button type="button" id="pinConfirmCancel" class="btn-secondary">Cancel</button>
-      <button type="button" id="pinConfirmSubmit" class="btn-primary">Confirm</button>
+      <button type="button" id="saleVoidBtn" class="btn btn-danger-soft">Void this sale</button>
+      <button type="button" id="saleVoidRequestBtn" class="btn" hidden>See the void request</button>
     </div>
   </div>
 </div>
 
-<!-- Receive Stock modal — used from the Stock screen -->
+<!-- A void waiting for owners: two have to say yes within 10 minutes (voids.js) -->
+<div id="voidOverlay" class="overlay" hidden>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="voidTitle">
+    <div class="modal-head">
+      <h3 id="voidTitle">Void a sale</h3>
+      <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="close"></span></button>
+    </div>
+    <div id="voidState" class="void-state"></div>
+    <dl class="facts" id="voidFacts"></dl>
+    <div id="voidLines" class="summary-lines"></div>
+    <h4 class="section-title void-approvals-title">Owners who said yes</h4>
+    <ul class="void-approvals" id="voidApprovals"></ul>
+    <p id="voidStatus" class="form-status"></p>
+    <div class="modal-actions" id="voidActions">
+      <button type="button" id="voidRejectBtn" class="btn btn-danger-soft">Don't void</button>
+      <button type="button" id="voidHereBtn" class="btn">Other owner approves here</button>
+      <button type="button" id="voidApproveBtn" class="btn btn-danger">Approve void</button>
+    </div>
+  </div>
+</div>
+
+<!-- The other owner approves at this screen, with their own password -->
+<div id="approveHereOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="approveHereTitle">
+    <div class="modal-head"><h3 id="approveHereTitle">Approve at this screen</h3></div>
+    <p class="modal-sub">The other owner picks their name and types their own password.</p>
+    <div class="field"><label for="approveHereOwner">Owner</label><select id="approveHereOwner" class="input"></select></div>
+    <div class="field"><label for="approveHerePin">User password</label><input id="approveHerePin" class="input input-pin" type="password" inputmode="numeric" maxlength="6" autocomplete="off" data-autofocus></div>
+    <div class="field" id="approveHereCodeField" hidden><label for="approveHereCode">Code from the authenticator app</label><input id="approveHereCode" class="input" type="text" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="123456"></div>
+    <p id="approveHereStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="approveHereBtn" class="btn btn-danger">Approve void</button>
+    </div>
+  </div>
+</div>
+
+<!-- One credit customer -->
+<div id="customerOverlay" class="overlay" hidden>
+  <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="customerName">
+    <div class="modal-head">
+      <div>
+        <h3 id="customerName"></h3>
+        <p class="muted" id="customerPhone"></p>
+      </div>
+      <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="close"></span></button>
+    </div>
+    <div class="owed-banner">
+      <div><span class="stat-label">Owes</span><strong id="customerOwed"></strong></div>
+      <div class="owed-actions">
+        <button type="button" class="btn" id="customerEditBtn">Edit name or phone</button>
+        <button type="button" class="btn btn-primary" id="customerPayBtn">Record a payment</button>
+      </div>
+    </div>
+    <h4 class="section-title">History</h4>
+    <ul class="history" id="customerHistory"></ul>
+  </div>
+</div>
+
+<!-- Record a credit payment -->
+<div id="paymentOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="paymentTitle">
+    <div class="modal-head"><h3 id="paymentTitle">Record a payment</h3></div>
+    <p class="modal-sub" id="paymentFor"></p>
+    <div class="field">
+      <label for="paymentAmount">Amount paid</label>
+      <div class="money-input"><span>₱</span><input id="paymentAmount" class="input input-lg" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" data-autofocus></div>
+    </div>
+    <div class="field">
+      <span class="label">Paid with</span>
+      <div class="segmented segmented-fill" id="paymentMethod">
+        <button type="button" data-method="cash" class="active">Cash</button>
+        <button type="button" data-method="gcash">GCash / PayMaya</button>
+      </div>
+    </div>
+    <div class="field"><label for="paymentReference">Reference or note <span class="optional">optional</span></label><input id="paymentReference" class="input" type="text" autocomplete="off"></div>
+    <p id="paymentStatus" class="form-status"></p>
+    <div class="modal-actions">
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="paymentSaveBtn" class="btn btn-primary">Save payment</button>
+    </div>
+  </div>
+</div>
+
+<!-- Signing out: a break keeps the shift open; ending it counts the drawer -->
+<div id="signOutOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="signOutTitle">
+    <div class="modal-head">
+      <h3 id="signOutTitle">Signing out?</h3>
+      <button type="button" class="icon-btn" data-close aria-label="Close"><span data-icon="close"></span></button>
+    </div>
+    <div class="option-list">
+      <button type="button" class="option" id="takeBreakBtn"><strong>Take a break</strong><span>Lock the screen. You stay clocked in.</span></button>
+      <button type="button" class="option" id="endShiftBtn"><strong>End my shift</strong><span>Count the cash and clock out.</span></button>
+    </div>
+  </div>
+</div>
+
+<!-- End shift: blind count first, then the result -->
+<div id="endShiftOverlay" class="overlay" hidden>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="endShiftTitle">
+    <div id="countStep">
+      <div class="modal-head"><h3 id="endShiftTitle">Count the cash</h3></div>
+      <p class="modal-sub">Count all the money in the drawer and enter the total.</p>
+      <div class="field">
+        <label for="countedCash">Cash in the drawer</label>
+        <div class="money-input"><span>₱</span><input id="countedCash" class="input input-lg" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" data-autofocus></div>
+      </div>
+      <p id="countStatus" class="form-status"></p>
+      <div class="modal-actions">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="button" id="countSubmitBtn" class="btn btn-primary">End shift</button>
+      </div>
+    </div>
+    <div id="resultStep" hidden>
+      <div class="modal-head"><h3>Shift ended</h3></div>
+      <dl class="facts facts-lg" id="shiftResult"></dl>
+      <div class="modal-actions">
+        <button type="button" id="resultDoneBtn" class="btn btn-primary">Done</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add delivery (receive stock) -->
 <div id="receiveOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>Receive Stock</h3>
-    <div class="form-row">
-      <label>Item</label>
-      <input id="receiveProductSearch" type="text" placeholder="Search by name or SKU...">
-      <div id="receiveProductResults"></div>
-      <div class="selected-chip" id="receiveSelected">None selected</div>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="receiveTitle">
+    <div class="modal-head"><h3 id="receiveTitle">Add a delivery</h3></div>
+    <div class="field">
+      <label for="receiveProductSearch">Item</label>
+      <div class="search picker">
+        <span data-icon="search" class="icon-lead"></span>
+        <input id="receiveProductSearch" class="input" type="search" placeholder="Search by name or SKU" autocomplete="off" data-autofocus>
+        <div id="receiveProductResults" class="picker-results"></div>
+      </div>
+      <div id="receiveSelected" class="selected" data-empty="No item selected"></div>
     </div>
-    <div class="form-row">
-      <label>Location</label>
-      <select id="receiveLocation"><option value="store">Store</option><option value="warehouse">Warehouse</option></select>
+    <div class="field">
+      <span class="label">Put it in</span>
+      <div class="segmented segmented-fill" id="receiveLocation">
+        <button type="button" data-location="store" class="active">Store</button>
+        <button type="button" data-location="warehouse">Warehouse</button>
+      </div>
     </div>
-    <div class="form-row"><label>Quantity received</label><input id="receiveQty" type="number" min="0.001" step="0.001"></div>
-    <div class="form-row"><label>Of which damaged (optional)</label><input id="receiveDamagedQty" type="number" min="0" step="0.001" value="0"></div>
+    <div class="field-row">
+      <div class="field"><label for="receiveQty">Quantity received</label><input id="receiveQty" class="input" type="number" min="0.001" step="0.001"></div>
+      <div class="field"><label for="receiveDamagedQty">Of which damaged</label><input id="receiveDamagedQty" class="input" type="number" min="0" step="0.001" value="0"></div>
+    </div>
     <p id="receiveStatus" class="form-status"></p>
     <div class="modal-actions">
-      <button type="button" id="receiveCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="receiveSubmitBtn" class="btn-primary">Receive</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="receiveSubmitBtn" class="btn btn-primary">Add to stock</button>
     </div>
   </div>
 </div>
 
-<!-- Add New Item modal — used from the Stock screen, for items that don't exist in the catalog yet -->
+<!-- New item -->
 <div id="addItemOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>Add New Item</h3>
-    <div class="form-row"><label>Item Code (SKU)</label><input id="addItemSku" type="text" placeholder="Fills in automatically once a category is picked"></div>
-    <div class="form-row"><label>Item Name</label><input id="addItemName" type="text" placeholder="e.g. Union Cement"></div>
-    <div class="form-row">
-      <label>Category</label>
-      <select id="addItemCategory"></select>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="addItemTitle">
+    <div class="modal-head"><h3 id="addItemTitle">New item</h3></div>
+    <div class="field"><label for="addItemName">Item name</label><input id="addItemName" class="input" type="text" placeholder="e.g. Union Cement" data-autofocus></div>
+    <div class="field-row">
+      <div class="field"><label for="addItemCategory">Category</label><select id="addItemCategory" class="input"></select></div>
+      <div class="field"><label for="addItemSku">Item code (SKU)</label><input id="addItemSku" class="input" type="text" placeholder="Filled in from the category"></div>
     </div>
-    <div class="form-row">
-      <label>Unit</label>
-      <select id="addItemUnit">
-        <option value="pc">pc (piece)</option>
-        <option value="bag">bag</option>
-        <option value="sheet">sheet</option>
-        <option value="roll">roll</option>
-        <option value="kg">kg</option>
-        <option value="ft">ft</option>
-      </select>
+    <div class="field-row">
+      <div class="field"><label for="addItemUnit">Sold per</label><select id="addItemUnit" class="input"></select></div>
+      <div class="field"><label for="addItemPrice">Selling price</label><input id="addItemPrice" class="input" type="number" min="0" step="0.01" placeholder="0.00"></div>
     </div>
-    <div class="form-row"><label>Selling Price</label><input id="addItemPrice" type="number" min="0" step="0.01" placeholder="0.00"></div>
-    <div class="form-row"><label>Low Stock Alert Level (optional)</label><input id="addItemReorder" type="number" min="0" step="1" value="10"></div>
+    <div class="field-row">
+      <div class="field"><label for="addItemStoreQty">How many in the store</label><input id="addItemStoreQty" class="input" type="number" min="0" step="0.001" value="0"></div>
+      <div class="field"><label for="addItemWarehouseQty">How many in the warehouse</label><input id="addItemWarehouseQty" class="input" type="number" min="0" step="0.001" value="0"></div>
+    </div>
+    <div class="field"><label for="addItemReorder">Warn me when stock is down to</label><input id="addItemReorder" class="input" type="number" min="0" step="1" value="10"></div>
     <p id="addItemStatus" class="form-status"></p>
     <div class="modal-actions">
-      <button type="button" id="addItemCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="addItemSubmitBtn" class="btn-primary">Add Item</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="addItemSubmitBtn" class="btn btn-primary">Add item</button>
     </div>
   </div>
 </div>
 
-<!-- Edit Item modal — used from the Stock List to change an item's name, unit, price, or low stock level -->
+<!-- Edit item, including how many are in the store and warehouse -->
 <div id="editItemOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>Edit Item</h3>
-    <div class="form-row"><label>Item Name</label><input id="editItemName" type="text"></div>
-    <div class="form-row">
-      <label>Unit</label>
-      <select id="editItemUnit">
-        <option value="pc">pc (piece)</option>
-        <option value="bag">bag</option>
-        <option value="sheet">sheet</option>
-        <option value="roll">roll</option>
-        <option value="kg">kg</option>
-        <option value="ft">ft</option>
-      </select>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="editItemTitle">
+    <div class="modal-head"><h3 id="editItemTitle">Edit item</h3><span class="muted" id="editItemSku"></span></div>
+    <div class="field"><label for="editItemName">Item name</label><input id="editItemName" class="input" type="text"></div>
+    <div class="field-row">
+      <div class="field"><label for="editItemUnit">Sold per</label><select id="editItemUnit" class="input"></select></div>
+      <div class="field"><label for="editItemPrice">Selling price</label><input id="editItemPrice" class="input" type="number" min="0" step="0.01"></div>
     </div>
-    <div class="form-row"><label>Selling Price</label><input id="editItemPrice" type="number" min="0" step="0.01"></div>
-    <div class="form-row"><label>Low Stock Alert Level</label><input id="editItemReorder" type="number" min="0" step="1"></div>
+    <div class="field-row">
+      <div class="field"><label for="editItemStoreQty">How many in the store</label><input id="editItemStoreQty" class="input" type="number" min="0" step="0.001" data-autofocus></div>
+      <div class="field"><label for="editItemWarehouseQty">How many in the warehouse</label><input id="editItemWarehouseQty" class="input" type="number" min="0" step="0.001"></div>
+    </div>
+    <div class="field"><label for="editItemReorder">Warn me when stock is down to</label><input id="editItemReorder" class="input" type="number" min="0" step="1"></div>
     <p id="editItemStatus" class="form-status"></p>
-    <div class="modal-actions">
-      <button type="button" id="editItemCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="editItemSubmitBtn" class="btn-primary">Save Changes</button>
+    <div class="modal-actions modal-actions-spread">
+      <button type="button" id="editItemArchiveBtn" class="btn btn-danger-soft">Archive item</button>
+      <div class="modal-actions-group">
+        <button type="button" class="btn" data-close>Cancel</button>
+        <button type="button" id="editItemSubmitBtn" class="btn btn-primary">Save</button>
+      </div>
     </div>
   </div>
 </div>
 
-<!-- Edit Staff modal — used from User Roles & Access to change a name, role, or PIN. Owner accounts also get a Two-Factor Login section here. -->
+<!-- Edit staff. Owner accounts also get two-factor login here. -->
 <div id="editStaffOverlay" class="overlay" hidden>
-  <div class="modal">
-    <h3>Edit Staff</h3>
-    <div class="form-row"><label>Full Name</label><input id="editStaffName" type="text"></div>
-    <div class="form-row">
-      <label>Role</label>
-      <select id="editStaffRole">
-        <option value="cashier">Cashier</option>
-        <option value="manager">Manager</option>
-        <option value="owner">Owner</option>
-      </select>
+  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editStaffTitle">
+    <div class="modal-head"><h3 id="editStaffTitle">Edit staff</h3></div>
+    <div class="field"><label for="editStaffName">Full name</label><input id="editStaffName" class="input" type="text" data-autofocus></div>
+    <div class="field">
+      <label for="editStaffRole">Role</label>
+      <select id="editStaffRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
     </div>
-    <div class="form-row"><label>New PIN (leave blank to keep the current one)</label><input id="editStaffPin" type="text" inputmode="numeric" placeholder="4-digit PIN"></div>
-    <div id="editStaffTwoFaSection" hidden style="margin-bottom:16px;">
-      <label style="display:block; font-size:12.5px; font-weight:700; margin-bottom:6px; color:var(--ink-soft); text-transform:uppercase; letter-spacing:0.03em;">Two-Factor Login (Google Authenticator)</label>
-      <div class="selected-chip" style="display:flex; align-items:center; justify-content:space-between;">
-        <span id="editStaffTwoFaStatus">Off</span>
-        <button type="button" class="btn-secondary" id="editStaffTwoFaToggle" style="margin-bottom:0;">Set Up</button>
+    <div class="field"><label for="editStaffPin">New user password <span class="optional">leave blank to keep the current one</span></label><input id="editStaffPin" class="input" type="text" inputmode="numeric" autocomplete="off"></div>
+    <div class="field" id="editStaffTwoFaSection" hidden>
+      <span class="label">Two-factor login</span>
+      <div class="setting-row">
+        <span><strong id="editStaffTwoFaStatus">Off</strong><span class="muted"> · Google Authenticator</span></span>
+        <button type="button" class="btn btn-sm" id="editStaffTwoFaToggle">Set up</button>
       </div>
     </div>
     <p id="editStaffStatus" class="form-status"></p>
     <div class="modal-actions">
-      <button type="button" id="editStaffCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="editStaffSubmitBtn" class="btn-primary">Save Changes</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="editStaffSubmitBtn" class="btn btn-primary">Save changes</button>
     </div>
   </div>
 </div>
 
-<!-- Two-Factor setup modal — shows a code to type into Google Authenticator (no QR image, every authenticator app supports manual entry), then confirms with a real code from it -->
+<!-- Two-factor setup -->
 <div id="twoFaOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>Set Up Two-Factor Login</h3>
-    <p class="sub">Open Google Authenticator (or a similar app), add a new account, and choose to enter the code manually instead of scanning. Use this code:</p>
-    <div class="selected-chip" id="twoFaSecretDisplay" style="text-align:center; font-size:18px; letter-spacing:2px; font-family:var(--font-display);"></div>
-    <div class="form-row" style="margin-top:16px;"><label>Enter the 6-digit code from the app to confirm</label><input id="twoFaConfirmCode" type="text" inputmode="numeric" maxlength="6" placeholder="123456"></div>
+  <div class="modal modal-md" role="dialog" aria-modal="true" aria-labelledby="twoFaTitle">
+    <div class="modal-head"><h3 id="twoFaTitle">Set up two-factor login</h3></div>
+    <p class="modal-sub">Scan this code with Google Authenticator (or a similar app), or type the key in by hand.</p>
+    <div id="twoFaQr" class="qr"></div>
+    <div class="selected is-set secret" id="twoFaSecretDisplay"></div>
+    <div class="field"><label for="twoFaConfirmCode">6-digit code from the app</label><input id="twoFaConfirmCode" class="input" type="text" inputmode="numeric" maxlength="6" placeholder="123456" autocomplete="one-time-code" data-autofocus></div>
     <p id="twoFaStatus" class="form-status"></p>
     <div class="modal-actions">
-      <button type="button" id="twoFaCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="twoFaConfirmBtn" class="btn-primary">Confirm &amp; Turn On</button>
+      <button type="button" class="btn" data-close>Cancel</button>
+      <button type="button" id="twoFaConfirmBtn" class="btn btn-primary">Turn on</button>
     </div>
   </div>
 </div>
 
-<!-- New Purchase Order modal — used from Supplier Orders -->
-<div id="poCreateOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>New Purchase Order</h3>
-    <div class="form-row">
-      <label>Supplier</label>
-      <select id="poSupplierSelect"><option value="">Select a supplier...</option></select>
-      <button type="button" class="btn-secondary" id="poNewSupplierToggle" style="margin-top:8px;">+ New supplier</button>
-      <div id="poNewSupplierFields" hidden style="margin-top:10px;">
-        <input id="poNewSupplierName" type="text" placeholder="Supplier name">
-        <input id="poNewSupplierPhone" type="text" placeholder="Phone (optional)" style="margin-top:8px;">
-        <button type="button" class="btn-primary" id="poNewSupplierSave" style="margin-top:8px;">Save supplier</button>
-      </div>
-    </div>
-    <div class="form-row">
-      <label>Items</label>
-      <input id="poProductSearch" type="text" placeholder="Search by name or SKU...">
-      <div id="poProductResults"></div>
-    </div>
-    <div id="poItemsList"></div>
-    <div class="form-row"><label>Expected date (optional)</label><input id="poExpectedDate" type="date"></div>
-    <div class="form-row"><label>Notes (optional)</label><textarea id="poNotes" rows="2"></textarea></div>
-    <p id="poCreateStatus" class="form-status"></p>
-    <div class="modal-actions">
-      <button type="button" id="poCancelBtn" class="btn-secondary">Cancel</button>
-      <button type="button" id="poSubmitBtn" class="btn-primary">Create PO</button>
-    </div>
+<div id="toasts" class="toasts" aria-live="polite"></div>
+
+<!-- Receipt-paper slip, only ever visible when printing (printSlip in ui.js):
+     the stock-out slip after a sale, or the pick slip the stockroom works
+     from. This store's POS is not BIR-accredited, so neither carries amounts,
+     and both say they can't be used for input tax. The BIR-registered invoice
+     is issued separately. The empty boxes are ticked by hand. -->
+<div id="slipPrintArea" class="slip print-only" aria-hidden="true">
+  <div class="slip-head">
+    <svg class="slip-logo" viewBox="0 0 48 48" aria-hidden="true"><g fill="none" stroke="#000" stroke-width="2.6" stroke-linejoin="round"><path fill="#000" d="M24 4 41.32 14 24 24 6.68 14Z"/><path d="M6.68 14 24 24V44L6.68 34Z"/><path d="M24 24 41.32 14V34L24 44Z"/></g></svg>
+    <div class="slip-store">RRC Merchandise</div>
+    <div class="slip-doc" id="slipDoc"></div>
   </div>
+  <dl class="slip-meta" id="slipMeta"></dl>
+  <table class="slip-items">
+    <thead><tr><th>Qty</th><th>Item</th><th class="slip-check" id="slipCheckHead"></th></tr></thead>
+    <tbody id="slipLines"></tbody>
+  </table>
+  <div class="slip-count"><span>Total items</span><span id="slipCount"></span></div>
+  <p class="slip-note" id="slipNote" hidden></p>
+  <div class="slip-sign">
+    <div><span class="slip-line-blank"></span><span id="slipSignA"></span></div>
+    <div><span class="slip-line-blank"></span><span id="slipSignB"></span></div>
+  </div>
+  <div class="slip-legal">
+    <strong>THIS DOCUMENT IS NOT VALID FOR CLAIM OF INPUT TAX</strong>
+    <span>This is not an official receipt or invoice.</span>
+  </div>
+  <p class="slip-foot" id="slipFoot"></p>
 </div>
 
-<!-- Checkout Review — shown when Charge is tapped. Nothing is recorded
-     yet: no activity log entry, no stock movement, sales totals stay
-     unchanged. Print or Done both finalize the sale; Print also opens
-     the print dialog afterward. Uses the same fixed .overlay as every
-     other modal on this page, so the sidebar never shifts while it's
-     open. -->
-<div id="checkoutReviewOverlay" class="overlay" hidden>
-  <div class="modal modal-wide">
-    <h3>Review Order</h3>
-    <div id="checkoutReviewLines" class="checkout-review-lines"></div>
-    <div class="totals">
-      <div class="row"><span>Subtotal</span><span id="checkoutSubtotal">&#8369;0.00</span></div>
-      <div class="row"><span>VAT (12%)</span><span id="checkoutVat">&#8369;0.00</span></div>
-      <div class="row grand"><span>Total</span><span id="checkoutTotal">&#8369;0.00</span></div>
-    </div>
-    <div class="form-row" style="margin-top:14px;">
-      <label>Cash Tendered</label>
-      <input id="checkoutCashTendered" type="number" min="0" step="0.01" inputmode="decimal">
-    </div>
-    <div class="checkout-change-row">
-      <span>Change</span>
-      <span id="checkoutChange">&#8369;0.00</span>
-    </div>
-    <div class="modal-actions" style="margin-top:18px;">
-      <button type="button" id="checkoutPrintBtn" class="btn-secondary">Print</button>
-      <button type="button" id="checkoutDoneBtn" class="btn-primary">Done</button>
-    </div>
-  </div>
-</div>
-
-<!-- Receipt — hidden on screen, only ever shown via @media print when
-     body.printing-receipt is set (see receipt.js). Everything else on the
-     page is hidden for the duration of that print job. -->
-<div id="receiptPrintArea">
-  <div class="receipt">
-    <div class="receipt-header">
-      <div class="receipt-store">Caidic Hardware</div>
-      <div class="receipt-meta" id="receiptMeta"></div>
-    </div>
-    <div class="receipt-lines" id="receiptLines"></div>
-    <div class="receipt-totals" id="receiptTotals"></div>
-    <div class="receipt-footer">Thank you!</div>
-  </div>
-</div>
+<!-- Price list: only visible when printed from the Stock screen -->
+<div id="priceListPrint" class="price-sheet print-only" aria-hidden="true"></div>
 
 <script type="module" src="/src/main.js"></script>
 </body>

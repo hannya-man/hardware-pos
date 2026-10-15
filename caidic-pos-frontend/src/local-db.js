@@ -1,114 +1,91 @@
-// local-db.js
-// Same shape as before — a mirror of the cloud catalog (synced DOWN,
-// read-only from the terminal's point of view) plus this terminal's own
-// transactions (written instantly, pushed UP later).
+// local-db.js — this terminal's offline copy (IndexedDB via Dexie).
+// Catalog tables (products, categories, users, stock_batches, customers) are
+// synced down from the server; sales, shifts, payments, logs and stock
+// movements are written here first and pushed up through the outbox.
 //
-// Two credentials now live in sync_meta, and they mean different things:
-//   - terminal_key: set ONCE, during this device's initial setup, by
-//     whoever configures a new till. Persists forever, unrelated to who's
-//     logged in. This is what lets catalog pulls and outbox pushes work
-//     regardless of whether a fresh Sanctum token happens to exist.
-//   - auth_token: a per-USER Sanctum token, fetched on demand right before
-//     an owner-gated action (Returns, Reconciliation, Analytics, Activity
-//     log) — never required just to log in and start billing.
+// sync_meta holds two different credentials:
+//   terminal_key — set once when the device is provisioned; used for sync.
+//   auth_token   — a per-person token, fetched only when a screen needs to
+//                  read the server (see session.js).
 
 import Dexie from 'dexie';
 
 export const db = new Dexie('hardware_pos');
 
-db.version(2).stores({
-  // ---- Synced DOWN from the cloud. The terminal never writes these. ----
+const schemaV2 = {
   products: 'id, sku, barcode, category_id, name, updated_at',
   categories: 'id, name',
   users: 'id, role',
   stock_batches: 'id, product_id, location, received_at, qty_good_remaining, updated_at',
-
-  // ---- Written here first, pushed UP via the outbox. ----
   sales: 'id, shift_id, client_created_at, status',
   sale_items: 'id, sale_id, product_id',
   shift_logs: 'id, status, started_at',
   audit_logs: 'id, actor_id, client_created_at',
   activity_log: 'id, actor_id, shift_id, client_created_at',
   stock_movements: 'id, product_id, batch_id, reference_id',
-
-  // ---- Sync machinery only. Never leaves this device. ----
   outbox_queue: 'id, status, entity_type, created_at',
-  sync_meta: 'key'
+  sync_meta: 'key',
+};
+
+// v2 changed the product shape; re-pulling the catalog beats migrating it.
+db.version(2).stores(schemaV2).upgrade((tx) => tx.table('products').clear());
+db.version(3).stores({ ...schemaV2, material_requests: 'id, requested_by, status, client_created_at' });
+
+// v4 adds credit customers and their payments. It also re-sends every shift
+// this device has, once: before the server kept the terminal's ids, shifts
+// were saved under different ones, so every sale and log pointing at them
+// was rejected. Re-sending them, and retrying what had given up, lets that
+// backlog through.
+db.version(4).stores({
+  customers: 'id, name, phone',
+  credit_payments: 'id, customer_id, shift_id, client_created_at',
+  shift_logs: 'id, status, started_at, terminal_id, cashier_id',
 }).upgrade(async (tx) => {
-  await tx.table('products').clear(); // v1 -> v2 shape changed enough that a fresh pullCatalog() is simpler than migrating field-by-field
+  const outbox = tx.table('outbox_queue');
+  for (const shift of await tx.table('shift_logs').toArray()) {
+    await outbox.add({
+      id: crypto.randomUUID(), entity_type: 'shift_log', entity_id: shift.id, payload: shift,
+      status: 'pending', retry_count: 0, created_at: '1970-01-01T00:00:00.000Z',
+    });
+  }
+  await outbox.where('status').equals('failed').modify({ status: 'pending', retry_count: 0, last_attempt_at: null });
 });
-
-// v3 — adds material_requests (Material Pick Lists). No shape change to
-// any existing table, so no upgrade() callback needed: Dexie just creates
-// the new, empty object store.
-db.version(3).stores({
-  products: 'id, sku, barcode, category_id, name, updated_at',
-  categories: 'id, name',
-  users: 'id, role',
-  stock_batches: 'id, product_id, location, received_at, qty_good_remaining, updated_at',
-
-  sales: 'id, shift_id, client_created_at, status',
-  sale_items: 'id, sale_id, product_id',
-  shift_logs: 'id, status, started_at',
-  audit_logs: 'id, actor_id, client_created_at',
-  activity_log: 'id, actor_id, shift_id, client_created_at',
-  stock_movements: 'id, product_id, batch_id, reference_id',
-  material_requests: 'id, requested_by, status, client_created_at',
-
-  outbox_queue: 'id, status, entity_type, created_at',
-  sync_meta: 'key'
-});
-
-export async function getTerminalId() {
-  const existing = await db.sync_meta.get('terminal_id');
-  if (existing) return existing.value;
-  const id = crypto.randomUUID();
-  await db.sync_meta.put({ key: 'terminal_id', value: id });
-  return id;
-}
-
-// Device-level credential — see the file header. isProvisioned() is what
-// the app checks on startup to decide whether to show a one-time setup
-// screen (enter the key an owner got from `php artisan terminal:provision`)
-// versus going straight to the staff PIN pad.
-export async function getTerminalKey() {
-  const row = await db.sync_meta.get('terminal_key');
-  return row ? row.value : null;
-}
-
-export async function setTerminalKey(key) {
-  await db.sync_meta.put({ key: 'terminal_key', value: key });
-}
-
-export async function isProvisioned() {
-  return (await getTerminalKey()) !== null;
-}
-
-// Per-user credential — see the file header. Short-lived in practice: it's
-// only fetched right before a gated action and it's fine if it's missing
-// most of the time.
-export async function getAuthToken() {
-  const row = await db.sync_meta.get('auth_token');
-  return row ? row.value : null;
-}
-
-export async function setAuthToken(token) {
-  await db.sync_meta.put({ key: 'auth_token', value: token });
-}
-
-export async function clearAuthToken() {
-  await db.sync_meta.delete('auth_token');
-}
-
-export async function getOpenShift(terminal_id) {
-  return db.shift_logs.where({ terminal_id, status: 'open' }).first();
-}
 
 export async function getSyncMeta(key, fallback = null) {
   const row = await db.sync_meta.get(key);
   return row ? row.value : fallback;
 }
 
-export async function setSyncMeta(key, value) {
-  await db.sync_meta.put({ key, value });
+export const setSyncMeta = (key, value) => db.sync_meta.put({ key, value });
+
+export async function getTerminalId() {
+  let id = await getSyncMeta('terminal_id');
+  if (!id) {
+    id = crypto.randomUUID();
+    await setSyncMeta('terminal_id', id);
+  }
+  return id;
+}
+
+export const getTerminalKey = () => getSyncMeta('terminal_key');
+export const setTerminalKey = (key) => setSyncMeta('terminal_key', key);
+export const isProvisioned = async () => (await getTerminalKey()) !== null;
+
+export const getAuthToken = () => getSyncMeta('auth_token');
+export const setAuthToken = (token) => setSyncMeta('auth_token', token);
+export const clearAuthToken = () => db.sync_meta.delete('auth_token');
+
+// One person's open shift on this terminal (resumed after a break or refresh).
+export const getOpenShift = (terminal_id, cashier_id) => db.shift_logs
+  .where('status').equals('open')
+  .filter((s) => s.terminal_id === terminal_id && s.cashier_id === cashier_id)
+  .first();
+
+// The cash counted when this terminal's last shift ended: the next shift's
+// starting cash, since the money stays in the drawer.
+export async function lastCountedCash(terminal_id) {
+  const closed = await db.shift_logs.where('terminal_id').equals(terminal_id)
+    .filter((s) => s.status === 'closed' && s.counted_cash != null)
+    .sortBy('ended_at');
+  return closed.at(-1)?.counted_cash ?? 0;
 }

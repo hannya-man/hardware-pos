@@ -6,7 +6,10 @@ use App\Http\Controllers\Api\Concerns\LogsActivity;
 use App\Http\Controllers\Controller;
 use App\Models\Category;
 use App\Models\Product;
+use App\Services\StockLedger;
 use Illuminate\Http\Request;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Gate;
 use Illuminate\Support\Str;
 
@@ -70,7 +73,7 @@ class ProductController extends Controller
         return response()->json(['sku' => $prefix.'-'.str_pad((string) $nextNumber, 3, '0', STR_PAD_LEFT)]);
     }
 
-    // POST /api/products — manager+owner (manage-catalog). Creates a
+    // POST /api/products — owners (manage-catalog). Creates a
     // brand new catalog entry. cost_price stays null here, same as
     // everywhere else in the app.
     //
@@ -78,7 +81,8 @@ class ProductController extends Controller
     // starting with "200", a block that real manufacturer barcodes don't
     // use, so it never collides with an item's own printed code. Nobody
     // has to invent this by hand either; it isn't even shown on the form.
-    public function store(Request $request)
+    // store_qty / warehouse_qty set the starting stock in the same save.
+    public function store(Request $request, StockLedger $ledger)
     {
         Gate::authorize('manage-catalog');
 
@@ -89,23 +93,36 @@ class ProductController extends Controller
             'unit' => ['required', 'string', 'max:20'],
             'unit_price' => ['required', 'numeric', 'min:0'],
             'reorder_level' => ['nullable', 'numeric', 'min:0'],
+            'store_qty' => ['nullable', 'numeric', 'min:0'],
+            'warehouse_qty' => ['nullable', 'numeric', 'min:0'],
         ]);
 
         do {
             $barcode = '200'.str_pad((string) random_int(0, 999999999), 9, '0', STR_PAD_LEFT);
         } while (Product::where('barcode', $barcode)->exists());
 
-        $product = Product::create([
-            'sku' => $data['sku'],
-            'barcode' => $barcode,
-            'name' => $data['name'],
-            'category_id' => $data['category_id'],
-            'unit' => $data['unit'],
-            'unit_price' => $data['unit_price'],
-            'cost_price' => null,
-            'reorder_level' => $data['reorder_level'] ?? 10,
-            'is_active' => true,
-        ]);
+        $product = DB::transaction(function () use ($data, $barcode, $request, $ledger) {
+            $product = Product::create([
+                'sku' => $data['sku'],
+                'barcode' => $barcode,
+                'name' => $data['name'],
+                'category_id' => $data['category_id'],
+                'unit' => $data['unit'],
+                'unit_price' => $data['unit_price'],
+                'cost_price' => null,
+                'reorder_level' => $data['reorder_level'] ?? 10,
+                'is_active' => true,
+            ]);
+
+            foreach (['store', 'warehouse'] as $location) {
+                $quantity = (float) ($data["{$location}_qty"] ?? 0);
+                if ($quantity > 0) {
+                    $ledger->setQuantity($product, $location, $quantity, $request->user()->id, 'Starting stock', 'stock_receipt');
+                }
+            }
+
+            return $product;
+        });
 
         $this->recordActivity($request, 'item_added_to_catalog', 'product', $product->id, [
             'product_name' => $product->name, 'sku' => $product->sku,
@@ -114,11 +131,11 @@ class ProductController extends Controller
         return response()->json($product, 201);
     }
 
-    // PATCH /api/products/{id} — manager+owner. Covers the full set of
-    // everyday edits from the Stock List: name, unit, price, low stock
-    // level, and archive/restore. cost_price and sku still aren't
-    // editable here on purpose.
-    public function update(Request $request, string $id)
+    // PATCH /api/products/{id} — owners. Covers the full set of
+    // everyday edits from the Stock screen: name, unit, price, low stock
+    // level, archive/restore, and the store / warehouse counts. cost_price
+    // and sku still aren't editable here on purpose.
+    public function update(Request $request, string $id, StockLedger $ledger)
     {
         Gate::authorize('manage-catalog');
 
@@ -131,9 +148,31 @@ class ProductController extends Controller
             'unit_price' => ['sometimes', 'numeric', 'min:0'],
             'reorder_level' => ['sometimes', 'numeric', 'min:0'],
             'is_active' => ['sometimes', 'boolean'],
+            'store_qty' => ['sometimes', 'numeric', 'min:0'],
+            'warehouse_qty' => ['sometimes', 'numeric', 'min:0'],
         ]);
 
-        $product->update($data);
+        $counts = DB::transaction(function () use ($product, $data, $request, $ledger) {
+            $product->update(Arr::except($data, ['store_qty', 'warehouse_qty']));
+
+            $counts = [];
+            foreach (['store', 'warehouse'] as $location) {
+                if (array_key_exists("{$location}_qty", $data)) {
+                    $delta = $ledger->setQuantity($product, $location, (float) $data["{$location}_qty"], $request->user()->id, 'Count corrected on the Stock screen');
+                    if (abs($delta) >= 0.001) {
+                        $counts[$location] = $delta;
+                    }
+                }
+            }
+
+            return $counts;
+        });
+
+        foreach ($counts as $location => $delta) {
+            $this->recordActivity($request, 'stock_quantity_adjusted', 'product', $product->id, [
+                'product_name' => $product->name, 'location' => $location, 'delta' => $delta,
+            ]);
+        }
 
         if (array_key_exists('unit_price', $data) && (float) $before['unit_price'] !== (float) $data['unit_price']) {
             $this->recordActivity($request, 'price_changed', 'product', $product->id, [

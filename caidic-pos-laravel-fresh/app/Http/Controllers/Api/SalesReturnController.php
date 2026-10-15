@@ -2,8 +2,10 @@
 
 namespace App\Http\Controllers\Api;
 
+use App\Http\Controllers\Api\Concerns\LogsActivity;
 use App\Http\Controllers\Controller;
 use App\Models\AuditLog;
+use App\Models\Product;
 use App\Models\SalesReturn;
 use App\Models\StockBatch;
 use Illuminate\Http\Request;
@@ -12,6 +14,8 @@ use Illuminate\Support\Facades\Gate;
 
 class SalesReturnController extends Controller
 {
+    use LogsActivity;
+
     public function store(Request $request)
     {
         // The real boundary. Hiding "Returns" from a cashier's menu is a
@@ -67,6 +71,12 @@ class SalesReturnController extends Controller
 
             return $return;
         });
+
+        $this->recordActivity($request, 'return_accepted', 'sales_return', $return->id, [
+            'product_name' => Product::find($data['product_id'])?->name,
+            'quantity' => $data['quantity_returned'],
+            'condition' => $data['condition'],
+        ]);
 
         return response()->json($return, 201);
     }

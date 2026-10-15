@@ -14,14 +14,22 @@ class UserController extends Controller
 {
     use LogsActivity;
 
-    // GET /users — the Staff Accounts table. manager+owner, same gate the
-    // nav already uses to decide whether to show this screen.
+    // GET /users — the Staff Accounts table (and the Staff Logs account
+    // picker, which reuses this same endpoint). Only active accounts are
+    // returned unless include_archived is explicitly passed — the same
+    // pattern InventoryController::stock() already uses for archived
+    // products — so a deactivated staff member now only ever turns up in
+    // Archives, not in either of those two lists.
     public function index(Request $request)
     {
         Gate::authorize('manage-users');
 
+        $includeArchived = $request->boolean('include_archived');
+
         return response()->json(
-            User::orderBy('full_name')->get(['id', 'full_name', 'role', 'is_active', 'totp_enabled'])
+            User::when(! $includeArchived, fn ($q) => $q->where('is_active', true))
+                ->orderBy('full_name')
+                ->get(['id', 'full_name', 'role', 'is_active', 'totp_enabled'])
         );
     }
 
@@ -31,7 +39,7 @@ class UserController extends Controller
 
         $data = $request->validate([
             'full_name' => ['required', 'string', 'max:255'],
-            'role' => ['required', 'in:cashier,manager,owner'],
+            'role' => ['required', 'in:cashier,owner'],
             'pin' => ['required', 'string', 'regex:/^[0-9]+$/'],
         ]);
 
@@ -59,10 +67,12 @@ class UserController extends Controller
 
         $data = $request->validate([
             'full_name' => ['sometimes', 'string', 'max:255'],
-            'role' => ['sometimes', 'in:cashier,manager,owner'],
+            'role' => ['sometimes', 'in:cashier,owner'],
             'pin' => ['sometimes', 'string', 'regex:/^[0-9]+$/'],
             'is_active' => ['sometimes', 'boolean'],
         ]);
+
+        $this->assertKeepsAnOwner($user, $data);
 
         if (isset($data['pin'])) {
             // Uses the role being saved to if it's changing, otherwise
@@ -104,16 +114,31 @@ class UserController extends Controller
         return response()->json($user);
     }
 
-    // Owners get a 6-digit PIN, cashiers and managers a 4-digit one —
-    // enforced here as the real boundary, in addition to whatever length
-    // the form on screen already asks for.
+    // Only owners can manage staff, so the last active owner can't be turned
+    // into a cashier or deactivated: nobody would be left to undo it.
+    private function assertKeepsAnOwner(User $user, array $data): void
+    {
+        $stopsBeingOwner = (isset($data['role']) && $data['role'] !== 'owner')
+            || (array_key_exists('is_active', $data) && ! $data['is_active']);
+
+        if ($user->isOwner() && $user->is_active && $stopsBeingOwner
+            && User::where('role', 'owner')->where('is_active', true)->count() <= 1) {
+            throw ValidationException::withMessages([
+                'role' => ['This is the only owner account, so it has to stay an active owner. Add another owner first.'],
+            ]);
+        }
+    }
+
+    // Owners get a 6-digit password, cashiers a 4-digit one — enforced here
+    // as the real boundary, in addition to whatever length the form on
+    // screen already asks for.
     private function assertPinLength(string $pin, string $role): void
     {
         $expected = $role === 'owner' ? 6 : 4;
 
         if (strlen($pin) !== $expected) {
             throw ValidationException::withMessages([
-                'pin' => ["A {$role} account needs a {$expected}-digit PIN."],
+                'pin' => ["A {$role} account needs a {$expected}-digit password."],
             ]);
         }
     }

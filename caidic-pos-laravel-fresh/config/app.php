@@ -67,6 +67,10 @@ return [
 
     'timezone' => 'UTC',
 
+    // Where the store is. Used for "today", "this week" and so on in reports;
+    // stored timestamps stay in UTC.
+    'store_timezone' => env('STORE_TIMEZONE', 'Asia/Manila'),
+
     /*
     |--------------------------------------------------------------------------
     | Application Locale Configuration
