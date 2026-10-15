@@ -6,6 +6,7 @@ use App\Traits\HasUuid;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
 use Illuminate\Database\Eloquent\Relations\HasMany;
+use Illuminate\Database\Eloquent\Relations\HasOne;
 
 class Sale extends Model
 {
@@ -14,7 +15,8 @@ class Sale extends Model
     protected $fillable = [
         'terminal_id', 'cashier_id', 'shift_id', 'subtotal', 'discount_amount',
         'tax_amount', 'total_amount', 'payment_method', 'amount_tendered',
-        'change_amount', 'status', 'voided_by', 'void_reason', 'client_created_at',
+        'change_amount', 'amount_paid', 'payment_reference', 'customer_id',
+        'status', 'voided_by', 'void_reason', 'client_created_at',
     ];
 
     protected $casts = [
@@ -25,6 +27,7 @@ class Sale extends Model
         'total_amount' => 'decimal:2',
         'amount_tendered' => 'decimal:2',
         'change_amount' => 'decimal:2',
+        'amount_paid' => 'decimal:2',
     ];
 
     public function items(): HasMany
@@ -40,5 +43,16 @@ class Sale extends Model
     public function shift(): BelongsTo
     {
         return $this->belongsTo(ShiftLog::class, 'shift_id');
+    }
+
+    public function customer(): BelongsTo
+    {
+        return $this->belongsTo(Customer::class);
+    }
+
+    // A void still waiting for a second owner (see VoidRequest).
+    public function pendingVoid(): HasOne
+    {
+        return $this->hasOne(VoidRequest::class)->where('status', 'pending')->where('expires_at', '>', now());
     }
 }

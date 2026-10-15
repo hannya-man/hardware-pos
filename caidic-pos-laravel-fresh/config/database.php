@@ -97,6 +97,10 @@ return [
             'prefix_indexes' => true,
             'search_path' => 'public',
             'sslmode' => env('DB_SSLMODE', 'prefer'),
+            // Laravel writes times in UTC without an offset. Without this the
+            // session uses the server's own zone (e.g. +08) and every saved
+            // time would land 8 hours early.
+            'timezone' => 'UTC',
         ],
 
         'sqlsrv' => [

@@ -1,0 +1,10 @@
+{
+  "name": "caidic-pos",
+  "private": true,
+  "scripts": {
+    "dev": "npm run dev --prefix caidic-pos-frontend",
+    "build": "npm run build --prefix caidic-pos-frontend",
+    "dev:laravel": "node dev.mjs",
+    "artisan": "node dev.mjs artisan"
+  }
+}

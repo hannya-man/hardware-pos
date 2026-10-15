@@ -1,702 +1,421 @@
-// main.js — the real app, replacing the test script from earlier. Every
-// function called here (verifyStaffLogin, searchProducts, completeSale,
-// etc.) is the actual offline-first logic already built, not mock data.
+// main.js — startup, sign-in (clock in), the menu, sign-out (break or end of
+// shift), and Sync now.
 
-import { db, getTerminalId, isProvisioned, setTerminalKey, getOpenShift, getSyncMeta, setSyncMeta } from './local-db.js';
-import { verifyStaffLogin, searchProducts, quickSelect, attachScannerListener, getProductByBarcode } from './input-handler.js';
-import { startSyncWorker, pullCatalog, forceFullSync, flushOutbox, completeSale, openShift, logActivity } from './sync-worker.js';
+import { db, isProvisioned, setTerminalKey, getTerminalId, getOpenShift, lastCountedCash, getSyncMeta, setSyncMeta } from './local-db.js';
+import { verifyStaffLogin } from './input-handler.js';
+import { startSyncWorker, pullCatalog, forceFullSync, flushOutbox, retryFailedOutbox, openShift, closeShift, shiftCash, forgetServerLogin, serverConfigured } from './sync-worker.js';
 import { verifyTotp } from './totp.js';
-import {
-  setAdminUser, renderActivity, renderShifts, renderVoid, renderReturns,
-  renderReconciliation, renderAnalytics, renderStaff, renderArchives
-} from './admin.js';
+import { session, setSession, log, connectToServer } from './session.js';
+import { $, esc, icon, peso, fmtTime, initials, sanitizeDecimal, keepDecimal, hydrateIcons, setStatus, openModal, closeModal, showPrompt, toast, slidingHighlight } from './ui.js';
+import { renderBilling, clearCart } from './billing.js';
+import { renderCredit } from './credit.js';
 import { renderDashboard } from './dashboard.js';
-import { renderStock, renderPriceList, renderMaterialRequests, renderPurchaseOrders, setInventoryUser } from './inventory.js';
-import { printReceipt } from './receipt.js';
+import { renderStock, renderMaterialRequests } from './inventory.js';
+import { renderSales, renderShifts, renderReturns, renderStaff } from './admin.js';
+import { startVoidAlerts, stopVoidAlerts } from './voids.js';
 
-const $ = (id) => document.getElementById(id);
-const peso = (n) => '\u20b1' + Number(n).toFixed(2);
-const round2 = (n) => Math.round(n * 100) / 100;
-const initials = (name) => name.split(' ').map((w) => w[0]).slice(0, 2).join('').toUpperCase();
+// Two roles: cashiers sell; owners also run the store screens.
+const EVERYONE = ['cashier', 'owner'];
+const OWNER = ['owner'];
 
-// Small in-page replacement for window.prompt(), which throws in Vite's
-// dev environment and many embedded/webview contexts. Used for the
-// terminal provisioning key and the shift opening-cash amount.
-function showPrompt(message, defaultValue = '') {
-  return new Promise((resolve) => {
-    const overlay = document.createElement('div');
-    overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);display:flex;align-items:center;justify-content:center;z-index:9999;';
-    overlay.innerHTML = `
-      <div style="background:#fff;padding:20px;border-radius:8px;min-width:280px;">
-        <p style="margin:0 0 10px;font-size:14px;">${message}</p>
-        <input type="text" value="${defaultValue}" style="width:100%;padding:8px;border:1px solid #ccc;border-radius:4px;box-sizing:border-box;">
-        <div style="margin-top:12px;text-align:right;">
-          <button type="button" data-act="cancel" style="margin-right:8px;">Cancel</button>
-          <button type="button" data-act="ok">OK</button>
-        </div>
-      </div>`;
-    document.body.appendChild(overlay);
-    const input = overlay.querySelector('input');
-    input.focus();
-    input.select();
-
-    const close = (result) => { overlay.remove(); resolve(result); };
-    overlay.querySelector('[data-act="ok"]').addEventListener('click', () => close(input.value));
-    overlay.querySelector('[data-act="cancel"]').addEventListener('click', () => close(null));
-    input.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter') close(input.value);
-      if (e.key === 'Escape') close(null);
-    });
-  });
-}
-
-// roles: which nav items each role sees. This is display-only — every
-// screen behind these is still enforced server-side by its own Gate; a
-// cashier who forced their way to, say, #viewStaff would just get 401s
-// back from every call admin.js makes.
-//
-// Grouped items (inventory, sales, staffGroup) render as a collapsible
-// section in the sidebar; their `children` are the actual clickable
-// leaves. Only leaves have onEnter / a matching view div — groups are
-// just a visual container and are never passed to switchView().
-//
-// billing's onEnter pulls the latest catalog before drawing the grid —
-// this covers the common case (a stale local copy). If a device's local
-// copy is missing something more stubbornly, that's what the Sync Now
-// button (see doManualSync below) is for.
-const NAV_ITEMS = [
-  { key: 'dashboard', label: 'Dashboard', roles: ['manager', 'owner'], onEnter: renderDashboard },
-  {
-    key: 'posTerminal', label: 'POS Terminal', roles: ['cashier', 'manager', 'owner'],
-    children: [
-      { key: 'billing', label: 'Billing & Checkout', roles: ['cashier', 'manager', 'owner'], onEnter: async () => { await pullCatalog().catch(() => {}); await renderGrid(); } },
-      { key: 'materialRequests', label: 'Material Pick Lists', roles: ['cashier', 'manager', 'owner'], onEnter: renderMaterialRequests },
-    ],
-  },
-  {
-    key: 'inventory', label: 'Inventory', roles: ['manager', 'owner'],
-    children: [
-      { key: 'stock', label: 'Stock List', roles: ['manager', 'owner'], onEnter: renderStock },
-      { key: 'reconciliation', label: 'Stock Audits', roles: ['owner'], onEnter: renderReconciliation },
-      { key: 'purchaseOrders', label: 'Supplier Orders', roles: ['manager', 'owner'], onEnter: renderPurchaseOrders },
-      { key: 'priceList', label: 'Price List', roles: ['manager', 'owner'], onEnter: renderPriceList },
-    ],
-  },
-  {
-    key: 'sales', label: 'Sales', roles: ['manager', 'owner'],
-    children: [
-      { key: 'salesOrders', label: 'Order History', roles: ['manager', 'owner'], onEnter: renderShifts },
-      { key: 'analytics', label: 'Fast & Slow Items', roles: ['owner'], onEnter: renderAnalytics },
-      { key: 'returns', label: 'Tool Returns', roles: ['owner'], onEnter: renderReturns },
-      { key: 'void', label: 'Cancelled Sales', roles: ['manager', 'owner'], onEnter: renderVoid },
-    ],
-  },
-  {
-    key: 'staffGroup', label: 'Security & Logs', roles: ['manager', 'owner'],
-    children: [
-      { key: 'activity', label: 'Staff Logs', roles: ['owner'], onEnter: renderActivity },
-      { key: 'staff', label: 'User Roles & Access', roles: ['manager', 'owner'], onEnter: renderStaff },
-    ],
-  },
-  { key: 'archives', label: 'Archives', roles: ['manager', 'owner'], onEnter: renderArchives },
+// What each role sees in the menu. Display only: the server checks the role
+// on every call, whatever this menu shows.
+const NAV = [
+  { items: [
+    { key: 'dashboard', label: 'Dashboard', icon: 'dashboard', roles: OWNER, render: renderDashboard,
+      help: 'How the store is doing: sales, money owed to you, stock value, and who is working.' },
+  ] },
+  { section: 'Daily work', items: [
+    { key: 'billing', label: 'Sell', icon: 'cart', roles: EVERYONE, render: renderBilling,
+      help: 'Scan, search, or tap items to add them, then Charge. Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready.' },
+    { key: 'credit', label: 'Credit (utang)', icon: 'wallet', roles: EVERYONE, render: renderCredit,
+      help: 'Customers who bought on credit and how much each one still owes. Record a payment when they pay.' },
+    { key: 'materialRequests', label: 'Pick lists', icon: 'clipboard', roles: EVERYONE, render: renderMaterialRequests,
+      help: 'What the stockroom has to get ready. Every sale shows up here on its own, with the Ref no. from its slip. Tap Print for a pick slip to work from, and Mark picked up once the customer has the items. You can also send a list without charging, for a big order or a delivery.' },
+  ] },
+  { section: 'Store', items: [
+    { key: 'stock', label: 'Stock', icon: 'box', roles: OWNER, render: renderStock,
+      help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count.' },
+    { key: 'sales', label: 'Sales', icon: 'bag', roles: OWNER, render: renderSales,
+      help: 'Every sale, with its items and how it was paid. Tap a sale to see it. To void one, a second owner has to approve within 10 minutes, or the sale stays as it is.' },
+    { key: 'shifts', label: 'Shifts', icon: 'clock', roles: OWNER, render: renderShifts,
+      help: 'When each person clocked in and out, what they sold, any cash difference, and everything they did. Tap a shift to see its timeline.' },
+    { key: 'returns', label: 'Returns', icon: 'undo', roles: OWNER, render: renderReturns,
+      help: 'Accept an item a customer brings back. An invoice or slip number, or a reason, is needed as proof.' },
+    { key: 'staff', label: 'Staff', icon: 'users', roles: OWNER, render: renderStaff,
+      help: 'Add staff, change a name, role, or password, and turn on two-factor login for owners.' },
+  ] },
 ];
 
-// One line of plain-language help per screen, shown from the "?" button
-// next to the page title in the header — one consistent spot on every
-// page, instead of scattered across different cards.
-const PAGE_HELP = {
-  dashboard: 'A quick look at how the store is doing: sales, stock on hand, and anything that needs attention.',
-  billing: 'This is the register. Scan a barcode, search, or tap an item to add it to the order, then charge.',
-  materialRequests: 'A pick list is a note to the stockroom asking them to prepare certain items, for example for a big customer order or a delivery. It does not charge the customer.',
-  stock: 'How much of each item is in the store and the warehouse. Add a new item, edit one, or archive an item no longer sold.',
-  reconciliation: 'Compares what the computer counted today against what is counted by hand, to catch mistakes before closing the day.',
-  purchaseOrders: 'Orders placed with a supplier for more stock. Mark one as received once the delivery arrives.',
-  priceList: 'Every item and its current price. Click a price to change it.',
-  returns: 'Accept an item a customer is bringing back. A receipt number or reason is required as proof.',
-  void: 'Cancel a sale that already went through, with a reason.',
-  analytics: 'Which items sell the most (fast movers) and which barely sell (slow movers), over the last 7 days.',
-  salesOrders: 'Every shift worked, what it sold, and any cash differences. Tap a shift to see its sales.',
-  activity: 'Pick a staff account to see everything logged under it: logins, sales, changes made, and when. Download saves just their most recent shift.',
-  staff: 'Add a staff account, or edit an existing one to change their name, role, or PIN. Owners can also turn on two-factor login here.',
-  archives: 'Items and staff that were archived or deactivated. Restore any of them from here.',
-};
+const SCREENS = NAV.flatMap((group) => group.items);
+const viewId = (key) => `view${key[0].toUpperCase()}${key.slice(1)}`;
+// Just the time for today; the date too for a shift left open since an earlier day.
+const since = (iso) => (new Date(iso).toDateString() === new Date().toDateString()
+  ? new Date(iso).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' })
+  : fmtTime(iso));
 
-let currentUser = null;
-let currentShiftId = null;
-let cart = [];
-let selectedLoginUser = null;
-let pinDraft = '';
-let loginStage = 'pin'; // 'pin' for the normal PIN pad, 'totp' for an owner's second-factor code
-let activeView = 'billing';
-let expandedGroups = new Set();
-let checkoutTotals = null; // set by openCheckoutReview(), cleared once the checkout popup closes
+let activeView = null;
+let selectedUser = null;
+let pin = '';
+let stage = 'pin'; // 'pin', then 'totp' for an owner with two-factor login on
+let checking = false;
+let typedPassword = null; // the sign-in password, handed to the session for the server login
 
 // ---------------------------------------------------------------------------
-// STARTUP
+// Startup
 // ---------------------------------------------------------------------------
 
-async function init() {
+async function boot() {
+  hydrateIcons();
+  buildKeypad();
+  // Choices that glide: Today / This week / ..., payment methods, the menu.
+  document.querySelectorAll('.segmented, .pay-methods, .nav').forEach((el) => slidingHighlight(el));
+  document.querySelectorAll('.choice-row').forEach((el) => slidingHighlight(el, '.choice:has(input:checked)'));
+
+  if (!serverConfigured) toast("This copy of the app wasn't built with its server address, so it can't sync.", 'error');
+
   if (!(await isProvisioned())) {
-    const key = await showPrompt("This terminal hasn't been set up yet. Enter its one-time key:");
-    if (key) await setTerminalKey(key.trim());
+    const key = await showPrompt('Set up this terminal', {
+      message: "This device hasn't been set up yet. Enter its one-time terminal key.",
+      placeholder: 'Terminal key',
+      confirmLabel: 'Save',
+    });
+    if (key?.trim()) await setTerminalKey(key.trim());
   }
 
+  let warnedKey = false;
   startSyncWorker({
-    onStatusChange: (status) => {
-      $('statusLabel').textContent = status === 'online' ? 'Active' : 'Inactive';
-      $('statusPill').classList.toggle('offline', status !== 'online');
+    onStatusChange: (online) => {
+      $('statusLabel').textContent = online ? 'Online' : 'Offline';
+      $('statusPill').classList.toggle('offline', !online);
     },
-    onNeedsProvisioning: () => window.alert('Terminal key missing or rejected. Sync will not work until this device is re-provisioned.')
+    onNeedsProvisioning: () => {
+      if (warnedKey) return;
+      warnedKey = true;
+      toast("This terminal's key is missing or was rejected. Sync is paused until it is set up again.", 'error');
+    },
   });
 
-  await pullCatalog().catch(() => {}); // best-effort — offline on first launch is fine, staff grid just stays empty until it succeeds
+  await pullCatalog().catch(() => {});
+  // One known account (or none) almost always means an incomplete first sync.
+  if ((await db.users.count()) <= 1) await forceFullSync().catch(() => {});
 
-  // Safety net: if this device only knows about one staff member (or
-  // none) locally, that's almost always a stale or incomplete first sync
-  // rather than the true state of things, so start over completely, just
-  // this once, automatically. Harmless if there really is only one
-  // account so far — it just means one extra full check.
-  const userCount = await db.users.count();
-  if (userCount <= 1) {
-    await forceFullSync().catch(() => {});
-  }
-
-  // Stay logged in across a page refresh. This device remembers who was
-  // last signed in here — not a real network session, just a plain local
-  // note in this browser's own storage — so refreshing the tab, or the
-  // app restarting, doesn't force a PIN re-entry mid-shift. If that
-  // account was deactivated in the meantime, this is caught below and
-  // the person is sent back to the login screen instead.
-  const savedUserId = await getSyncMeta('current_user_id', null);
-  if (savedUserId) {
-    const savedUser = await db.users.get(savedUserId);
-    if (savedUser && savedUser.is_active !== false) {
-      currentUser = savedUser;
-      await enterApp({ logEvent: 'session_resumed' });
-      return;
-    }
-    await setSyncMeta('current_user_id', null);
-  }
-
+  // Stay signed in across a refresh, unless the account was deactivated meanwhile.
+  const savedId = await getSyncMeta('current_user_id');
+  const saved = savedId ? await db.users.get(savedId) : null;
+  if (saved && saved.is_active !== false) return enterApp(saved, 'session_resumed');
+  if (savedId) await setSyncMeta('current_user_id', null);
   await renderStaffGrid();
 }
 
 // ---------------------------------------------------------------------------
-// LOGIN — fully local. verifyStaffLogin() never touches the network.
-// Owner accounts use a 6-digit PIN; cashier and manager accounts use 4.
-// An owner with two-factor login turned on is asked for a 6-digit
-// authenticator code as a second step after the PIN is accepted — that
-// check runs fully offline too, using the same code this device already
-// synced down (see totp.js), no network call needed at the moment of
-// login.
+// Sign-in. Fully offline: checked against this device's synced PIN hashes.
+// Owners use 6 digits (plus an authenticator code if two-factor is on).
 // ---------------------------------------------------------------------------
 
 async function renderStaffGrid() {
-  const users = await db.users.filter((u) => u.is_active !== false).toArray();
+  const users = await db.users.filter((u) => u.is_active !== false).sortBy('full_name');
   $('staffGrid').innerHTML = users.length
     ? users.map((u) => `
-        <button type="button" class="staff-card" data-id="${u.id}">
-          <span class="av">${initials(u.full_name)}</span>
-          <span class="nm">${u.full_name}</span>
-          <span class="rl${u.role === 'owner' ? ' owner' : ''}">${u.role}</span>
+        <button type="button" class="staff-card" data-id="${esc(u.id)}">
+          <span class="avatar${u.role === 'owner' ? ' avatar-accent' : ''}">${esc(initials(u.full_name))}</span>
+          <span class="staff-name">${esc(u.full_name)}</span>
+          <span class="staff-role">${esc(u.role)}</span>
         </button>`).join('')
-    : '<p style="grid-column:1/-1; text-align:center; color:#6B655A; font-size:13px;">No staff found yet. Tap "Sync Now" below to check again.</p>';
-
-  $('staffGrid').querySelectorAll('.staff-card').forEach((btn) => {
-    btn.addEventListener('click', () => openPinPad(users.find((u) => u.id === btn.dataset.id)));
-  });
+    : '<p class="empty-note">No staff on this device yet. Tap Sync staff list to check again.</p>';
 }
 
-function pinLengthFor(user) {
-  return user?.role === 'owner' ? 6 : 4;
-}
+$('staffGrid').addEventListener('click', async (e) => {
+  const card = e.target.closest('[data-id]');
+  const user = card && await db.users.get(card.dataset.id);
+  if (user) openPinPad(user);
+});
+
+const pinLength = () => (stage === 'totp' || selectedUser?.role === 'owner' ? 6 : 4);
 
 function openPinPad(user) {
-  selectedLoginUser = user;
-  pinDraft = '';
-  loginStage = 'pin';
-  $('staffGrid').hidden = true;
+  selectedUser = user;
+  stage = 'pin';
+  pin = '';
+  $('staffPicker').hidden = $('loginHint').hidden = true;
   $('pinPad').hidden = false;
-  $('pinName').textContent = user.full_name;
   $('pinAv').textContent = initials(user.full_name);
+  $('pinAv').classList.toggle('avatar-accent', user.role === 'owner');
+  $('pinName').textContent = user.full_name;
+  $('pinPrompt').textContent = `Enter your ${pinLength()}-digit password`;
   $('loginError').textContent = '';
-  $('pinPadTitle').hidden = true;
   renderPinDots();
 }
 
-$('pinBack').addEventListener('click', () => {
-  $('staffGrid').hidden = false;
+function closePinPad() {
+  selectedUser = null;
+  stage = 'pin';
+  pin = '';
+  typedPassword = null;
   $('pinPad').hidden = true;
-  selectedLoginUser = null;
-  loginStage = 'pin';
-});
-
-function renderPinDots() {
-  const targetLength = loginStage === 'totp' ? 6 : pinLengthFor(selectedLoginUser);
-  const container = document.querySelector('.pin-dots');
-  if (container.children.length !== targetLength) {
-    container.innerHTML = Array.from({ length: targetLength }, () => '<span></span>').join('');
-  }
-  container.querySelectorAll('span').forEach((dot, i) => dot.classList.toggle('filled', i < pinDraft.length));
+  $('staffPicker').hidden = $('loginHint').hidden = false;
 }
 
-const KEYS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'];
-$('keypad').innerHTML = KEYS.map((k) => {
-  if (k === 'clear') return '<button type="button" class="wide" data-key="clear">Clear</button>';
-  if (k === 'back') return '<button type="button" class="wide" data-key="back">\u232b</button>';
-  return `<button type="button" data-key="${k}">${k}</button>`;
-}).join('');
+function renderPinDots() {
+  $('pinDots').innerHTML = Array.from({ length: pinLength() }, (_, i) => `<span${i < pin.length ? ' class="filled"' : ''}></span>`).join('');
+}
 
-$('keypad').querySelectorAll('button').forEach((btn) => {
-  btn.addEventListener('click', async () => {
-    const k = btn.dataset.key;
-    const targetLength = loginStage === 'totp' ? 6 : pinLengthFor(selectedLoginUser);
-    if (k === 'clear') pinDraft = '';
-    else if (k === 'back') pinDraft = pinDraft.slice(0, -1);
-    else if (pinDraft.length < targetLength) pinDraft += k;
-    renderPinDots();
-    if (pinDraft.length === targetLength) {
-      if (loginStage === 'pin') await attemptLogin();
-      else await attemptTotp();
-    }
-  });
-});
+function buildKeypad() {
+  $('keypad').innerHTML = ['1', '2', '3', '4', '5', '6', '7', '8', '9', 'clear', '0', 'back'].map((key) => {
+    if (key === 'clear') return '<button type="button" class="key-text" data-key="clear">Clear</button>';
+    if (key === 'back') return `<button type="button" class="key-text" data-key="back" aria-label="Delete">${icon('backspace')}</button>`;
+    return `<button type="button" data-key="${key}">${key}</button>`;
+  }).join('');
+}
 
-async function attemptLogin() {
-  const { approved, user } = await verifyStaffLogin(selectedLoginUser.id, pinDraft);
+async function pressKey(key) {
+  if (checking) return;
+  if (key === 'clear') pin = '';
+  else if (key === 'back') pin = pin.slice(0, -1);
+  else if (pin.length < pinLength()) pin += key;
+  renderPinDots();
+  if (pin.length < pinLength()) return;
 
-  if (!approved) {
-    $('loginError').textContent = 'Incorrect PIN. Try again.';
-    pinDraft = '';
-    renderPinDots();
-    return;
+  checking = true;
+  try {
+    if (stage === 'pin') await checkPin();
+    else await checkTotp();
+  } finally {
+    checking = false;
   }
+}
+
+async function checkPin() {
+  const { approved, user, locked } = await verifyStaffLogin(selectedUser.id, pin);
+  if (!approved) return loginFailed(locked ? 'Too many tries. Wait a minute, then try again.' : 'Wrong password. Try again.');
+  typedPassword = pin; // before a two-factor step reuses the keypad
 
   if (user.role === 'owner' && user.totp_enabled) {
     if (!user.totp_secret) {
-      // Two-factor is on for this account, but this device hasn't
-      // synced the secret needed to check the code — happens if it was
-      // just turned on somewhere else and this terminal hasn't been
-      // online since. Connectivity is required to fix this once; after
-      // that, checking the code works offline like everything else here.
-      $('loginError').textContent = 'Two-factor login has not synced to this device yet. Connect to the internet and try again.';
-      pinDraft = '';
-      renderPinDots();
-      return;
+      return loginFailed('Two-factor login has not synced to this device yet. Connect to the internet and try again.');
     }
-
-    loginStage = 'totp';
-    pinDraft = '';
-    $('pinPadTitle').hidden = false;
-    $('pinPadTitle').textContent = 'Enter the 6-digit code from your authenticator app';
+    stage = 'totp';
+    pin = '';
+    $('pinPrompt').textContent = 'Enter the 6-digit code from your authenticator app';
     $('loginError').textContent = '';
-    renderPinDots();
-    return;
+    return renderPinDots();
   }
 
-  currentUser = user;
+  await signIn(user);
+}
+
+async function checkTotp() {
+  if (await verifyTotp(selectedUser.totp_secret, pin)) return signIn(selectedUser);
+  loginFailed('That code did not match. Try again.');
+}
+
+function loginFailed(message) {
+  pin = '';
+  renderPinDots();
+  $('loginError').textContent = message;
+  $('pinDots').classList.remove('shake');
+  void $('pinDots').offsetWidth; // restart the animation
+  $('pinDots').classList.add('shake');
+}
+
+async function signIn(user) {
+  const password = typedPassword;
+  typedPassword = null;
+  await forgetServerLogin(); // never act on the server as the previous person
   await setSyncMeta('current_user_id', user.id);
-  await enterApp({ logEvent: 'login' });
+  closePinPad();
+  await enterApp(user, 'login', password);
 }
 
-async function attemptTotp() {
-  const ok = await verifyTotp(selectedLoginUser.totp_secret, pinDraft);
+$('keypad').addEventListener('click', (e) => {
+  const key = e.target.closest('[data-key]')?.dataset.key;
+  if (key) pressKey(key);
+});
+$('pinBack').addEventListener('click', closePinPad);
 
-  if (!ok) {
-    $('loginError').textContent = 'That code did not match. Try again.';
-    pinDraft = '';
-    renderPinDots();
-    return;
-  }
-
-  currentUser = selectedLoginUser;
-  await setSyncMeta('current_user_id', currentUser.id);
-  await enterApp({ logEvent: 'login' });
-}
+// A physical keyboard works on the PIN pad too.
+document.addEventListener('keydown', (e) => {
+  if ($('loginScreen').hidden || $('pinPad').hidden || document.querySelector('.overlay:not([hidden])')) return;
+  if (/^\d$/.test(e.key)) pressKey(e.key);
+  else if (e.key === 'Backspace') pressKey('back');
+  else if (e.key === 'Escape') closePinPad();
+});
 
 // ---------------------------------------------------------------------------
-// APP SHELL
+// Clock in: signing in resumes this person's open shift on this terminal, or
+// starts a new one with the cash that's in the drawer.
 // ---------------------------------------------------------------------------
 
-// logEvent controls what (if anything) gets written to Staff Logs for
-// this entry into the app: 'login' for a real PIN/code entry,
-// 'session_resumed' when a page refresh restored an existing session,
-// or omitted entirely when neither applies.
-async function enterApp({ logEvent } = {}) {
+async function enterApp(user, logEvent, password = null) {
   $('loginScreen').hidden = true;
   $('appShell').hidden = false;
-  $('sideName').textContent = currentUser.full_name;
-  $('sideRole').textContent = currentUser.role;
-  $('sideAv').textContent = initials(currentUser.full_name);
-  setAdminUser(currentUser);
-  setInventoryUser(currentUser);
+  $('sideName').textContent = user.full_name;
+  $('sideAv').textContent = initials(user.full_name);
+  $('sideAv').classList.toggle('avatar-accent', user.role === 'owner');
 
-  const terminal_id = await getTerminalId();
-  const openShiftRow = await getOpenShift(terminal_id);
-
-  if (openShiftRow) {
-    currentShiftId = openShiftRow.id;
-  } else {
-    const openingRaw = await showPrompt('Opening cash amount:', '0');
-    const opening_cash = parseFloat(openingRaw) || 0;
-    currentShiftId = await openShift({ cashier_id: currentUser.id, opening_cash });
+  const terminalId = await getTerminalId();
+  let shift = await getOpenShift(terminalId, user.id);
+  const resumed = !!shift;
+  if (!shift) {
+    const lastCount = await lastCountedCash(terminalId);
+    const cash = await showPrompt(`Hi, ${user.full_name.split(' ')[0]}! Start your shift`, {
+      message: 'How much cash is in the drawer right now?',
+      value: String(lastCount || 0),
+      inputmode: 'decimal',
+      confirmLabel: 'Start shift',
+      cancelLabel: null,
+    });
+    await openShift({ cashier_id: user.id, opening_cash: Number(sanitizeDecimal(cash ?? '')) || 0 });
+    shift = await getOpenShift(terminalId, user.id);
   }
 
-  if (logEvent) {
-    await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: logEvent });
-  }
-
+  setSession(user, shift.id, password);
+  // Ready for screens that read the server, so there's no second password prompt.
+  const connected = password ? connectToServer() : Promise.resolve();
+  if (resumed) log(logEvent); // a new shift already logs its own clock-in
+  $('sideShift').textContent = `On shift since ${since(shift.started_at)}`;
   renderNav();
-  switchView('billing');
-  await renderGrid();
-  renderCart();
-}
-
-function flattenLeaves(items) {
-  return items.flatMap((item) => (item.children ? flattenLeaves(item.children) : [item]));
-}
-
-function findLeaf(key) {
-  return flattenLeaves(NAV_ITEMS).find((item) => item.key === key);
-}
-
-function findParentGroup(key) {
-  return NAV_ITEMS.find((item) => item.children?.some((c) => c.key === key));
+  showView(user.role === 'cashier' ? 'billing' : 'dashboard');
+  connected.then(startVoidAlerts); // owners: voids waiting for their yes
 }
 
 function renderNav() {
-  $('navItems').innerHTML = NAV_ITEMS
-    .filter((item) => item.roles.includes(currentUser.role))
-    .map((item) => {
-      if (!item.children) {
-        return `<button type="button" class="nav-item${item.key === activeView ? ' active' : ''}" data-view="${item.key}">${item.label}</button>`;
-      }
-      const visibleChildren = item.children.filter((c) => c.roles.includes(currentUser.role));
-      if (!visibleChildren.length) return '';
-      const isOpen = expandedGroups.has(item.key);
-      return `
-        <div class="nav-group${isOpen ? ' open' : ''}" data-group-key="${item.key}">
-          <button type="button" class="nav-group-header" data-group="${item.key}">
-            <span>${item.label}</span>
-            <span class="nav-chevron">&#9662;</span>
-          </button>
-          <div class="nav-group-children">
-            ${visibleChildren.map((c) => `
-              <button type="button" class="nav-item nav-item-child${c.key === activeView ? ' active' : ''}" data-view="${c.key}">${c.label}</button>
-            `).join('')}
-          </div>
-        </div>`;
-    }).join('');
-
-  $('navItems').querySelectorAll('[data-view]').forEach((btn) => {
-    btn.addEventListener('click', () => switchView(btn.dataset.view));
-  });
-  $('navItems').querySelectorAll('[data-group]').forEach((btn) => {
-    btn.addEventListener('click', () => toggleGroup(btn.dataset.group));
-  });
+  const { role } = session.user;
+  $('navItems').innerHTML = NAV.map(({ section, items }) => {
+    const visible = items.filter((item) => item.roles.includes(role));
+    if (!visible.length) return '';
+    return `${section ? `<p class="nav-section">${section}</p>` : ''}${visible.map((item) => `
+      <button type="button" class="nav-item" data-view="${item.key}" title="${item.label}">${icon(item.icon)}<span class="nav-label">${item.label}</span></button>`).join('')}`;
+  }).join('');
 }
 
-function toggleGroup(key) {
-  const groupEl = document.querySelector(`.nav-group[data-group-key="${key}"]`);
-  if (!groupEl) return;
-  const isOpen = groupEl.classList.toggle('open');
-  if (isOpen) expandedGroups.add(key); else expandedGroups.delete(key);
+function showView(key) {
+  const screen = SCREENS.find((s) => s.key === key);
+  activeView = key;
+  document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== viewId(key); });
+  $('navItems').querySelectorAll('[data-view]').forEach((btn) => btn.classList.toggle('active', btn.dataset.view === key));
+  $('viewTitle').textContent = screen.label;
+  $('pageHelpPop').textContent = screen.help;
+  $('content').scrollTop = 0;
+  screen.render();
 }
 
-// Every screen change is its own small entry in Staff Logs (event_type
-// 'view_opened') — deliberately at the level of "which screen did they
-// open", not every single click inside it. Logging literally every
-// click and page refresh was asked for, but doing that for real would
-// flood the log with thousands of low-value rows per shift and add a
-// small delay to every tap during actual billing, which is the one
-// place this app cannot afford to slow down. This still answers "what
-// did this person look at and do" without either of those costs.
-function switchView(view) {
-  const isNewView = view !== activeView;
-  activeView = view;
-  const parent = findParentGroup(view);
-  if (parent) expandedGroups.add(parent.key);
+$('navItems').addEventListener('click', (e) => {
+  const key = e.target.closest('[data-view]')?.dataset.view;
+  if (!key || key === activeView) return;
+  showView(key);
+  log('view_opened', { entity_type: 'view', details: { view: key } });
+});
 
-  document.querySelectorAll('.view').forEach((el) => { el.hidden = el.id !== `view${capitalize(view)}`; });
-  const entry = findLeaf(view);
-  $('viewTitle').textContent = entry?.label ?? view;
-  $('pageHelpPop').innerHTML = PAGE_HELP[view] ?? '';
-  $('pageHelpWrap').hidden = !PAGE_HELP[view];
-  renderNav();
-  entry?.onEnter?.();
+// ---------------------------------------------------------------------------
+// Sign out: a break keeps the shift open; ending it is a blind cash count
+// (the expected amount only shows after the count is entered).
+// ---------------------------------------------------------------------------
 
-  if (isNewView && currentUser) {
-    logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'view_opened', entity_type: 'view', details: { view } });
-  }
-}
-
-function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
-
-$('logoutBtn').addEventListener('click', async () => {
-  await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'logout' });
+async function signOut() {
+  stopVoidAlerts();
+  await forgetServerLogin();
   await setSyncMeta('current_user_id', null);
-  currentUser = null;
-  cart = [];
-  activeView = 'billing';
-  expandedGroups.clear();
+  setSession(null, null);
+  clearCart();
+  activeView = null;
   $('appShell').hidden = true;
   $('loginScreen').hidden = false;
-  $('staffGrid').hidden = false;
-  $('pinPad').hidden = true;
   await renderStaffGrid();
-});
-
-// ---------------------------------------------------------------------------
-// BILLING — quickSelect() and searchProducts() read the LOCAL catalog only,
-// same as they always have. completeSale() still doesn't allocate against
-// stock_batches (flagged repeatedly) — this UI doesn't hide that, it just
-// doesn't block on it either.
-// ---------------------------------------------------------------------------
-
-async function renderGrid() {
-  const products = await db.products.filter((p) => p.is_active !== false).toArray();
-  $('grid').innerHTML = products.length
-    ? products.map((p) => `
-        <button class="qkey" type="button" data-id="${p.id}">
-          <span class="nm">${p.name}</span>
-          <span class="pr">${peso(p.unit_price)} / ${p.unit}</span>
-        </button>`).join('')
-    : `<div class="empty-ticket" style="grid-column:1/-1;">
-         No items are loaded on this device yet.<br>
-         Tap "Sync Now" at the top of the screen, or check that this device has internet.
-       </div>`;
-
-  $('grid').querySelectorAll('.qkey').forEach((btn) => {
-    btn.addEventListener('click', () => addToCart(btn.dataset.id, 'quick-select'));
-  });
 }
 
-async function addToCart(productId, source) {
-  const line = await quickSelect(productId, 1);
-  if (!line) return;
+$('logoutBtn').addEventListener('click', () => openModal('signOutOverlay'));
 
-  const existing = cart.find((l) => l.product_id === line.product_id);
-  if (existing) {
-    existing.quantity += 1;
-    existing.line_total = round2(existing.unit_price_snapshot * existing.quantity);
-  } else {
-    cart.push(line);
+$('takeBreakBtn').addEventListener('click', async () => {
+  closeModal('signOutOverlay');
+  log('screen_locked');
+  await signOut();
+});
+
+$('endShiftBtn').addEventListener('click', async () => {
+  closeModal('signOutOverlay');
+  await pullCatalog().catch(() => {}); // learns of voids approved elsewhere, so they leave the count
+  const cash = await shiftCash(session.shiftId);
+  if (!cash.opening && !cash.cashIn) {
+    await closeShift({ shift_id: session.shiftId, counted_cash: null });
+    toast('Shift ended. No cash to count this time.');
+    return signOut();
   }
-
-  await logActivity({
-    actor_id: currentUser.id, shift_id: currentShiftId,
-    event_type: source === 'scan' ? 'barcode_scanned' : 'item_added',
-    entity_type: 'product', entity_id: productId
-  });
-
-  renderCart();
-}
-
-function renderCart() {
-  $('lines').innerHTML = cart.length
-    ? cart.map((line, i) => `
-        <div class="line">
-          <span class="nm">${line.name_snapshot}</span>
-          <span class="leader"></span>
-          <span class="qty">\u00d7${line.quantity}</span>
-          <span class="amt">${peso(line.line_total)}</span>
-          <button type="button" data-remove="${i}" aria-label="Remove">\u2715</button>
-        </div>`).join('')
-    : '<div class="empty-ticket">No items yet. Scan, search, or tap an item.</div>';
-
-  $('lines').querySelectorAll('[data-remove]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      cart.splice(Number(btn.dataset.remove), 1);
-      renderCart();
-    });
-  });
-
-  const subtotal = round2(cart.reduce((sum, l) => sum + l.line_total, 0));
-  const vat = round2(subtotal * 0.12);
-  const total = round2(subtotal + vat);
-
-  $('subtotal').textContent = peso(subtotal);
-  $('vat').textContent = peso(vat);
-  $('grandTotal').textContent = peso(total);
-  $('chargeBtn').disabled = cart.length === 0;
-}
-
-$('searchInput').addEventListener('input', async (e) => {
-  const q = e.target.value;
-  if (!q.trim()) { $('searchResults').innerHTML = ''; return; }
-
-  const hits = await searchProducts(q);
-  $('searchResults').innerHTML = hits.length
-    ? hits.map((p) => `<button type="button" class="search-hit" data-id="${p.id}">${p.name} (${peso(p.unit_price)})</button>`).join('')
-    : '<p class="placeholder-note" style="padding:6px 2px;">No matches.</p>';
-
-  $('searchResults').querySelectorAll('.search-hit').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      addToCart(btn.dataset.id, 'search');
-      $('searchInput').value = '';
-      $('searchResults').innerHTML = '';
-    });
-  });
+  $('countedCash').value = '';
+  setStatus('countStatus');
+  $('countStep').hidden = false;
+  $('resultStep').hidden = true;
+  openModal('endShiftOverlay');
 });
 
-attachScannerListener(async (code) => {
-  if (!currentUser) return; // scanner only active once logged in
-  const product = await getProductByBarcode(code);
-  if (product) {
-    addToCart(product.id, 'scan');
-  } else {
-    await logActivity({ actor_id: currentUser.id, shift_id: currentShiftId, event_type: 'barcode_no_match', details: { code } });
-  }
-});
+$('countedCash').addEventListener('input', (e) => keepDecimal(e.target));
+$('countedCash').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('countSubmitBtn').click(); });
 
-// ---------------------------------------------------------------------------
-// CHECKOUT REVIEW — tapping Charge opens this popup instead of charging
-// right away. Nothing is written here: completeSale() (which is what
-// actually logs activity, moves stock, and updates sales totals) is only
-// called once the cashier presses Print or Done below. Both buttons
-// finalize the sale the same way; Print also opens the receipt print
-// dialog afterward. Closing/leaving this popup without pressing either
-// one leaves no trace — the cart is untouched and nothing was recorded.
-// ---------------------------------------------------------------------------
+$('countSubmitBtn').addEventListener('click', async () => {
+  const raw = $('countedCash').value.trim();
+  if (!raw) return setStatus('countStatus', 'Enter the amount you counted (0 if the drawer is empty).', 'err');
 
-function openCheckoutReview() {
-  if (!cart.length) return;
-
-  const subtotal = round2(cart.reduce((sum, l) => sum + l.line_total, 0));
-  const tax_amount = round2(subtotal * 0.12);
-  const total_amount = round2(subtotal + tax_amount);
-  checkoutTotals = { subtotal, tax_amount, total_amount };
-
-  $('checkoutReviewLines').innerHTML = cart.map((line) => `
-    <div class="checkout-review-line">
-      <div class="crl-name">${line.name_snapshot}</div>
-      <span class="crl-category">${line.category_name ?? 'Uncategorized'}</span>
-      <div class="crl-detail">
-        <span>${line.quantity} \u00d7 ${peso(line.unit_price_snapshot)}</span>
-        <span>${peso(line.line_total)}</span>
-      </div>
-    </div>`).join('');
-
-  $('checkoutSubtotal').textContent = peso(subtotal);
-  $('checkoutVat').textContent = peso(tax_amount);
-  $('checkoutTotal').textContent = peso(total_amount);
-  $('checkoutCashTendered').value = total_amount.toFixed(2);
-
-  $('checkoutReviewOverlay').hidden = false;
-  refreshChange();
-  $('checkoutCashTendered').focus();
-  $('checkoutCashTendered').select();
-}
-
-function pesoSigned(n) {
-  return (n < 0 ? '-' : '') + peso(Math.abs(n));
-}
-
-function refreshChange() {
-  if (!checkoutTotals) return;
-  const tendered = Number($('checkoutCashTendered').value) || 0;
-  const change = round2(tendered - checkoutTotals.total_amount);
-  $('checkoutChange').textContent = pesoSigned(change);
-  $('checkoutChange').closest('.checkout-change-row').classList.toggle('checkout-change-short', change < 0);
-}
-
-$('checkoutCashTendered').addEventListener('input', refreshChange);
-
-async function finalizeCheckout({ shouldPrint }) {
-  if (!checkoutTotals) return;
-
-  $('checkoutPrintBtn').disabled = true;
-  $('checkoutDoneBtn').disabled = true;
-
+  $('countSubmitBtn').disabled = true;
   try {
-    const tendered = Number($('checkoutCashTendered').value) || checkoutTotals.total_amount;
-    const change_amount = round2(tendered - checkoutTotals.total_amount);
-    const soldItems = [...cart];
-
-    const sale_id = await completeSale({
-      cashier_id: currentUser.id,
-      shift_id: currentShiftId,
-      cart,
-      payment_method: 'cash',
-      amount_tendered: tendered,
-      tax_amount: checkoutTotals.tax_amount
-    });
-
-    if (shouldPrint) {
-      printReceipt({
-        saleId: sale_id,
-        cashierName: currentUser.full_name,
-        cart: soldItems,
-        subtotal: checkoutTotals.subtotal,
-        taxAmount: checkoutTotals.tax_amount,
-        totalAmount: checkoutTotals.total_amount,
-        paymentMethod: 'cash',
-        amountTendered: tendered,
-        changeAmount: Math.max(change_amount, 0)
-      });
-    }
-
-    cart = [];
-    renderCart();
-    $('checkoutReviewOverlay').hidden = true;
-    checkoutTotals = null;
+    const shift = await closeShift({ shift_id: session.shiftId, counted_cash: Number(raw) });
+    const diff = shift.cash_discrepancy;
+    const verdict = diff === 0 ? ['Exact', 'text-ok'] : diff < 0 ? [`Short by ${peso(-diff)}`, 'text-bad'] : [`Over by ${peso(diff)}`, 'text-bad'];
+    $('shiftResult').innerHTML = `
+      <dt>Should be in the drawer</dt><dd>${peso(shift.expected_cash)}</dd>
+      <dt>You counted</dt><dd>${peso(shift.counted_cash)}</dd>
+      <dt>Difference</dt><dd class="${verdict[1]}">${verdict[0]}</dd>`;
+    $('countStep').hidden = true;
+    $('resultStep').hidden = false;
+    $('resultDoneBtn').focus();
   } finally {
-    $('checkoutPrintBtn').disabled = false;
-    $('checkoutDoneBtn').disabled = false;
+    $('countSubmitBtn').disabled = false;
   }
-}
+});
 
-$('chargeBtn').addEventListener('click', openCheckoutReview);
-$('checkoutPrintBtn').addEventListener('click', () => finalizeCheckout({ shouldPrint: true }));
-$('checkoutDoneBtn').addEventListener('click', () => finalizeCheckout({ shouldPrint: false }));
+// Escape or Cancel: before the count, just closes; after it, the shift is
+// already over, so it finishes signing out.
+$('endShiftOverlay').querySelector('[data-close]').addEventListener('click', () => {
+  if (!$('resultStep').hidden) $('resultDoneBtn').click();
+});
+
+$('resultDoneBtn').addEventListener('click', async () => {
+  closeModal('endShiftOverlay');
+  await signOut();
+});
 
 // ---------------------------------------------------------------------------
-// MANUAL SYNC — the Sync Now button. Unlike the quiet, incremental pulls
-// that happen automatically, this always starts the catalog copy over
-// from scratch (forceFullSync) and says plainly what happened afterward
-// — including the real error message on failure now, not just a generic
-// "something went wrong", so a problem here is something that can
-// actually be diagnosed instead of only guessed at. Works from the
-// login screen too, before anyone's signed in.
+// Sync now: retries anything stuck, pushes what's waiting, and re-downloads
+// the whole catalog. Works from the sign-in screen too.
 // ---------------------------------------------------------------------------
 
-async function doManualSync() {
-  const buttons = [$('syncNowBtn'), $('syncNowLoginBtn')].filter(Boolean);
-  buttons.forEach((b) => { b.disabled = true; b.textContent = 'Syncing...'; });
+async function syncNow() {
+  const buttons = [$('syncNowBtn'), $('syncNowLoginBtn')];
+  buttons.forEach((b) => { b.disabled = true; b.classList.add('is-busy'); });
 
   try {
+    await retryFailedOutbox();
     await flushOutbox();
-    const ok = await forceFullSync();
-
-    if (!ok) {
-      window.alert("Could not reach the server. Check that this device has internet, and that it has been set up with its one-time key.");
+    if (await forceFullSync()) {
+      const [items, staff] = await Promise.all([db.products.count(), db.users.count()]);
+      toast(`Synced. This device has ${items} items and ${staff} staff accounts.`);
     } else {
-      const productCount = await db.products.count();
-      const userCount = await db.users.count();
-      window.alert(`Synced. This device now has ${productCount} item(s) and ${userCount} staff account(s).`);
+      toast('Could not reach the server. Check the internet connection and that this terminal has been set up.', 'error');
     }
 
-    if (currentUser) {
-      await findLeaf(activeView)?.onEnter?.();
-    } else {
-      await renderStaffGrid();
-    }
+    if (session.user) await SCREENS.find((s) => s.key === activeView)?.render();
+    else await renderStaffGrid();
   } catch (err) {
-    window.alert(`Could not sync. ${err.message || 'Unknown error.'}`);
+    toast(`Could not sync. ${err.message || 'Unknown error.'}`, 'error');
   } finally {
-    buttons.forEach((b) => { b.disabled = false; b.textContent = 'Sync Now'; });
+    buttons.forEach((b) => { b.disabled = false; b.classList.remove('is-busy'); });
   }
 }
 
-$('syncNowBtn')?.addEventListener('click', doManualSync);
-$('syncNowLoginBtn')?.addEventListener('click', doManualSync);
+$('syncNowBtn').addEventListener('click', syncNow);
+$('syncNowLoginBtn').addEventListener('click', syncNow);
 
-// ---------------------------------------------------------------------------
-// HELP BUBBLE — one "?" next to the page title in the header, its
-// explanation swapped out per screen in switchView() above. Shows on
-// hover/focus (see style.css), no click needed to open or close it. The
-// connection-status help bubble next to Sync Now works the same way
-// automatically, since it uses the same .help-wrap/.help-btn markup.
-// ---------------------------------------------------------------------------
+// The published app keeps a copy of itself, so it still opens with the
+// internet down (public/sw.js). Not in development, where files change.
+if ('serviceWorker' in navigator && import.meta.env.PROD) navigator.serviceWorker.register('./sw.js').catch(() => {});
 
-init();
+boot();

@@ -24,7 +24,7 @@ class TotpService
     // The link an authenticator app would scan as a QR code. Not used
     // for a QR image here (no image library involved), but the secret
     // inside it is exactly what someone would type in manually.
-    public static function provisioningUri(string $secret, string $accountName, string $issuer = 'Caidic Hardware'): string
+    public static function provisioningUri(string $secret, string $accountName, string $issuer = 'RRC Merchandise'): string
     {
         $label = rawurlencode($issuer.':'.$accountName);
         $query = http_build_query([

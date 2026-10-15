@@ -10,9 +10,9 @@ use Illuminate\Support\Facades\Gate;
 class InventoryController extends Controller
 {
     // GET /inventory/stock?include_archived=1
-    // Per-product position across both locations, plus damaged units.
-    // Never selects cost_price — this feeds Price List too, and that
-    // screen is the one most likely to get printed or shown around.
+    // Each item's good stock in the store and the warehouse, plus damaged
+    // units. Never includes cost_price. Quantities are changed through
+    // ProductController (edit an item) or a delivery synced from a terminal.
     public function stock(Request $request)
     {
         Gate::authorize('manage-catalog');
@@ -24,7 +24,7 @@ class InventoryController extends Controller
                 ->select('id', 'product_id', 'location', 'qty_good_remaining', 'qty_damaged')])
             ->when(! $includeArchived, fn ($q) => $q->where('is_active', true))
             ->orderBy('name')
-            ->get(['id', 'sku', 'name', 'unit', 'unit_price', 'reorder_level', 'is_active']);
+            ->get(['id', 'sku', 'name', 'category_id', 'unit', 'unit_price', 'reorder_level', 'is_active']);
 
         return response()->json($products->map(function ($product) {
             $storeGood = $product->batches->where('location', 'store')->sum('qty_good_remaining');
@@ -32,6 +32,7 @@ class InventoryController extends Controller
 
             return [
                 'id' => $product->id, 'sku' => $product->sku, 'name' => $product->name,
+                'category_id' => $product->category_id,
                 'unit' => $product->unit, 'unit_price' => $product->unit_price,
                 'reorder_level' => $product->reorder_level, 'is_active' => $product->is_active,
                 'store_good' => (float) $storeGood, 'warehouse_good' => (float) $warehouseGood,

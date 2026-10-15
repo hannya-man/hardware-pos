@@ -1,63 +1,50 @@
-// dashboard.js — Sales Activity/Orders, Active Items, Top Selling,
-// Inventory Summary, Purchase Orders (Supplier Orders pending count),
-// Stock Alerts, and Register Status. manager+owner, gated server-side by
-// view-dashboard.
+// dashboard.js — sales, money owed, stock value and alerts, who's working,
+// and what's selling or not (owners).
 
-import { fetchDashboard } from './sync-worker.js';
-import { withServerAuth } from './admin.js';
+import { fetchDashboard, flushOutbox } from './sync-worker.js';
+import { withServerAuth } from './session.js';
+import { $, esc, peso, qty, fmtTime, countTo } from './ui.js';
 
-const $ = (id) => document.getElementById(id);
-const peso = (n) => '\u20b1' + Number(n).toFixed(2);
-const num = (n) => Number(n).toLocaleString(undefined, { maximumFractionDigits: 1 });
-const fmtSince = (iso) => new Date(iso).toLocaleTimeString('en-PH', { hour: '2-digit', minute: '2-digit' });
+const METHODS = [['cash', 'Cash'], ['gcash', 'GCash / PayMaya'], ['credit', 'Credit']];
+// Just the time for today; the date too for a shift left open since an earlier day.
+const since = (iso) => (new Date(iso).toDateString() === new Date().toDateString()
+  ? new Date(iso).toLocaleTimeString('en-PH', { hour: 'numeric', minute: '2-digit' })
+  : fmtTime(iso));
 
-let currentPeriod = 'today';
+let period = 'today';
+
+const list = (id, items, render, empty) => {
+  $(id).innerHTML = items.length ? items.map(render).join('') : `<li class="muted">${empty}</li>`;
+};
 
 export async function renderDashboard() {
-  $('dashPeriod').querySelectorAll('.period-btn').forEach((btn) => {
-    btn.onclick = () => {
-      currentPeriod = btn.dataset.period;
-      loadDashboard(currentPeriod);
-    };
-  });
-  await loadDashboard(currentPeriod);
-}
-
-async function loadDashboard(period) {
-  $('dashPeriod').querySelectorAll('.period-btn').forEach((btn) => {
-    btn.classList.toggle('active', btn.dataset.period === period);
-  });
+  $('dashPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === period));
+  await flushOutbox().catch(() => {}); // include sales made on this device moments ago
 
   try {
-    const data = await withServerAuth(() => fetchDashboard(period));
+    const d = await withServerAuth(() => fetchDashboard(period));
+    const split = METHODS.filter(([key]) => d.sales.by_method[key]).map(([key, label]) => `${label} ${peso(d.sales.by_method[key])}`);
 
-    $('dashRevenue').textContent = peso(data.sales_activity.revenue);
-    $('dashOrderCount').textContent = data.sales_orders.order_count;
-    $('dashActiveSkus').textContent = data.active_items;
-    $('dashGoodUnits').textContent = num(data.inventory_summary.good_units_on_hand);
-    $('dashRetailValue').textContent = peso(data.inventory_summary.retail_value_on_hand);
-    $('dashPendingPOs').textContent = data.purchase_orders.pending;
+    countTo($('dashSales'), d.sales.total);
+    $('dashSalesSub').textContent = `${d.sales.count} sale${d.sales.count === 1 ? '' : 's'}${split.length ? ` · ${split.join(' · ')}` : ''}`;
+    countTo($('dashOwed'), d.credit_owed);
+    countTo($('dashStock'), d.stock.store_value + d.stock.warehouse_value);
+    $('dashStockSub').textContent = `Store ${peso(d.stock.store_value)} · Warehouse ${peso(d.stock.warehouse_value)}`;
+    countTo($('dashLow'), d.stock.low_stock_count, Math.round);
+    $('dashLowCard').classList.toggle('is-warn', d.stock.low_stock_count > 0);
 
-    // Stock Alerts — count only for now, not period-scoped (it's a
-    // right-now fact). Click-through to the actual low-stock rows lives
-    // on Stock's own "Low" flag.
-    $('dashLowStockCount').textContent = data.stock_alerts.low_stock_count;
-
-    // Register Status — whichever terminal has an open shift right now,
-    // across the whole store, not just this device.
-    if (data.register_status.open) {
-      $('dashRegisterStatus').textContent = 'Open';
-      $('dashRegisterDetail').textContent = `${data.register_status.cashier} since ${fmtSince(data.register_status.started_at)}`;
-    } else {
-      $('dashRegisterStatus').textContent = 'Closed';
-      $('dashRegisterDetail').textContent = 'No shift currently open';
-    }
-
-    const tbody = $('dashTopSelling').querySelector('tbody');
-    tbody.innerHTML = data.top_selling.length
-      ? data.top_selling.map((p) => `<tr><td>${p.name}</td><td class="amt-cell">${p.units_sold}</td></tr>`).join('')
-      : '<tr class="empty-row"><td colspan="2">Nothing sold in this period yet.</td></tr>';
+    list('dashOnShift', d.on_shift, (s) => `<li><span>${esc(s.name)}</span><span class="muted">since ${since(s.started_at)}</span></li>`, 'Nobody is clocked in.');
+    list('dashTop', d.top_selling, (p) => `<li><span>${esc(p.name)}</span><span class="muted">${qty(p.units_sold)} ${esc(p.unit)}</span></li>`, 'Nothing sold in this period yet.');
+    list('dashSlow', d.not_selling, (p) => `<li><span>${esc(p.name)}</span><span class="muted">${peso(p.value)} in stock</span></li>`, 'Everything in stock sold recently.');
   } catch (err) {
-    $('dashRevenue').textContent = "Couldn't load";
+    $('dashSales').textContent = '—';
+    $('dashSalesSub').textContent = `Couldn't load. ${err.message}`;
   }
 }
+
+$('dashPeriod').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-period]');
+  if (!btn) return;
+  period = btn.dataset.period;
+  renderDashboard();
+});
