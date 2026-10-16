@@ -1,0 +1,87 @@
+# Nightly backup of the Supabase database, and a daily check that the site
+# and the database answer. Supabase's free plan keeps no backups, so these are
+# the store's copies (docs/compliance/business-continuity.md has the restore
+# steps). GitHub emails the repository owner when either job fails.
+#
+# Each backup (roles, schema and data, as SQL) is encrypted on the runner with
+# BACKUP_PASSPHRASE before it is stored, and kept as a workflow artifact for
+# 30 days. Artifacts of a public repository can be downloaded by anyone
+# signed in to GitHub, so a backup is never stored unencrypted.
+#
+# Needs two more repository secrets (Settings > Secrets and variables > Actions):
+#   SUPABASE_DB_URL    Supabase > Connect > "Session pooler" connection string,
+#                      with the database password filled in
+#   BACKUP_PASSPHRASE  a long random passphrase. Keep a copy somewhere safe
+#                      outside GitHub: without it the backups can't be opened.
+
+name: Nightly backup
+
+on:
+  schedule:
+    - cron: '0 18 * * *' # 02:00 in Manila, after closing
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - name: The site and the database answer
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_PUBLISHABLE_KEY: ${{ secrets.SUPABASE_PUBLISHABLE_KEY }}
+        run: |
+          owner="${GITHUB_REPOSITORY%%/*}"
+          site="https://${owner,,}.github.io/${GITHUB_REPOSITORY#*/}/"
+          curl -fsS -o /dev/null "$site" || { echo "::error::The site at $site didn't answer."; exit 1; }
+          curl -fsS -o /dev/null -X POST "$SUPABASE_URL/rest/v1/rpc/pos_ping" \
+            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H "Content-Type: application/json" -d '{}' \
+            || { echo "::error::Supabase didn't answer. If the project was paused, restore it from the Supabase dashboard."; exit 1; }
+
+  backup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check the backup secrets are set
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ] || [ -z "$BACKUP_PASSPHRASE" ]; then
+            echo "::error::Add the SUPABASE_DB_URL and BACKUP_PASSPHRASE secrets (see DEPLOY.md), then run this again."
+            exit 1
+          fi
+
+      - uses: supabase/setup-cli@v3
+        with:
+          version: latest
+
+      - name: Dump the database
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          mkdir backup
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/roles.sql --role-only
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/schema.sql
+          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/data.sql --data-only --use-copy
+          grep -q 'sales' backup/data.sql || { echo "::error::The data dump has no sales in it."; exit 1; }
+
+      - name: Encrypt it
+        id: encrypt
+        env:
+          BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          name="pos-backup-$(date -u +%Y-%m-%d)"
+          tar -czf "$name.tar.gz" -C backup .
+          printf '%s' "$BACKUP_PASSPHRASE" | gpg --batch --yes --pinentry-mode loopback --passphrase-fd 0 \
+            --symmetric --cipher-algo AES256 -o "$name.tar.gz.gpg" "$name.tar.gz"
+          rm -rf backup "$name.tar.gz"
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.encrypt.outputs.name }}
+          path: ${{ steps.encrypt.outputs.name }}.tar.gz.gpg
+          retention-days: 30
+          if-no-files-found: error

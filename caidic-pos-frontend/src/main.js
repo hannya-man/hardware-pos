@@ -3,16 +3,27 @@
 
 import { db, isProvisioned, setTerminalKey, getTerminalId, getOpenShift, lastCountedCash, getSyncMeta, setSyncMeta } from './local-db.js';
 import { verifyStaffLogin } from './input-handler.js';
-import { startSyncWorker, pullCatalog, forceFullSync, flushOutbox, retryFailedOutbox, openShift, closeShift, shiftCash, forgetServerLogin, serverConfigured } from './sync-worker.js';
+import {
+  startSyncWorker, pullCatalog, forceFullSync, flushOutbox, retryFailedOutbox, openShift, closeShift, shiftCash,
+  forgetServerLogin, recordFailedSignIn, serverConfigured,
+} from './sync-worker.js';
 import { verifyTotp } from './totp.js';
 import { session, setSession, log, connectToServer } from './session.js';
 import { $, esc, icon, peso, fmtTime, initials, sanitizeDecimal, keepDecimal, hydrateIcons, setStatus, openModal, closeModal, showPrompt, toast, slidingHighlight } from './ui.js';
-import { renderBilling, clearCart } from './billing.js';
+import { renderBilling, clearCart, cancelCheckout } from './billing.js';
 import { renderCredit } from './credit.js';
 import { renderDashboard } from './dashboard.js';
 import { renderStock, renderMaterialRequests } from './inventory.js';
-import { renderSales, renderShifts, renderReturns, renderStaff } from './admin.js';
+import { renderSales, renderShifts, renderReturns, renderStaff, renderAudit } from './admin.js';
 import { startVoidAlerts, stopVoidAlerts } from './voids.js';
+
+// Never inside another site's page, where a hidden frame could trick someone
+// into tapping (clickjacking). GitHub Pages can't send the header that would
+// forbid it, so the app refuses to start instead.
+if (window.top !== window.self) {
+  document.body.replaceChildren();
+  throw new Error('Open the POS directly, not inside another page.');
+}
 
 // Two roles: cashiers sell; owners also run the store screens.
 const EVERYONE = ['cashier', 'owner'];
@@ -44,6 +55,8 @@ const NAV = [
       help: 'Accept an item a customer brings back. An invoice or slip number, or a reason, is needed as proof.' },
     { key: 'staff', label: 'Staff', icon: 'users', roles: OWNER, render: renderStaff,
       help: 'Add staff, change a name, role, or password, and turn on two-factor login for owners.' },
+    { key: 'audit', label: 'Audit log', icon: 'shield', roles: OWNER, render: renderAudit,
+      help: "Events that need an owner's eyes: wrong passwords at sign-in, cash differences at the end of a shift, voided sales, items sold beyond the stock count, returns, and devices with a wrong clock. Download it to keep a copy for your records." },
   ] },
 ];
 
@@ -84,10 +97,22 @@ async function boot() {
   }
 
   let warnedKey = false;
+  let online = null;
+  let unsynced = 0;
+  const drawStatus = () => {
+    $('statusLabel').textContent = `${online ? 'Online' : online === false ? 'Offline' : 'Checking…'}${unsynced ? ` · ${unsynced} not synced` : ''}`;
+    $('statusPill').classList.toggle('offline', online === false);
+    $('statusPill').classList.toggle('attention', unsynced > 0);
+  };
   startSyncWorker({
-    onStatusChange: (online) => {
-      $('statusLabel').textContent = online ? 'Online' : 'Offline';
-      $('statusPill').classList.toggle('offline', !online);
+    onStatusChange: (now) => {
+      online = now;
+      drawStatus();
+    },
+    onUnsynced: (count) => {
+      if (count > unsynced) toast(`${count} record${count === 1 ? '' : 's'} couldn't be saved on the server. Tap Sync now; if it stays, tell an owner.`, 'error');
+      unsynced = count;
+      drawStatus();
     },
     onNeedsProvisioning: () => {
       if (warnedKey) return;
@@ -100,10 +125,14 @@ async function boot() {
   // One known account (or none) almost always means an incomplete first sync.
   if ((await db.users.count()) <= 1) await forceFullSync().catch(() => {});
 
-  // Stay signed in across a refresh, unless the account was deactivated meanwhile.
+  // A refresh keeps the person signed in, unless the account was deactivated
+  // meanwhile, or the till sat unused longer than the screen lock allows
+  // (closed overnight, say): then they sign in again and their shift is
+  // still open.
   const savedId = await getSyncMeta('current_user_id');
   const saved = savedId ? await db.users.get(savedId) : null;
-  if (saved && saved.is_active !== false) return enterApp(saved, 'session_resumed');
+  const recent = Date.now() - (await getSyncMeta('last_active_at', 0)) < IDLE_LOCK_MINUTES * 60_000;
+  if (saved && saved.is_active !== false && recent) return enterApp(saved, 'session_resumed');
   if (savedId) await setSyncMeta('current_user_id', null);
   await renderStaffGrid();
 }
@@ -187,7 +216,10 @@ async function pressKey(key) {
 
 async function checkPin() {
   const { approved, user, locked } = await verifyStaffLogin(selectedUser.id, pin);
-  if (!approved) return loginFailed(locked ? 'Too many tries. Wait a minute, then try again.' : 'Wrong password. Try again.');
+  if (!approved) {
+    recordFailedSignIn({ user_id: selectedUser.id, step: 'password', locked: !!locked }).catch(() => {});
+    return loginFailed(locked ? 'Too many tries. Wait a minute, then try again.' : 'Wrong password. Try again.');
+  }
   typedPassword = pin; // before a two-factor step reuses the keypad
 
   if (user.role === 'owner' && user.totp_enabled) {
@@ -206,6 +238,7 @@ async function checkPin() {
 
 async function checkTotp() {
   if (await verifyTotp(selectedUser.totp_secret, pin)) return signIn(selectedUser);
+  recordFailedSignIn({ user_id: selectedUser.id, step: 'code' }).catch(() => {});
   loginFailed('That code did not match. Try again.');
 }
 
@@ -223,6 +256,7 @@ async function signIn(user) {
   typedPassword = null;
   await forgetServerLogin(); // never act on the server as the previous person
   await setSyncMeta('current_user_id', user.id);
+  await setSyncMeta('last_active_at', Date.now());
   closePinPad();
   await enterApp(user, 'login', password);
 }
@@ -331,6 +365,38 @@ $('takeBreakBtn').addEventListener('click', async () => {
   log('screen_locked');
   await signOut();
 });
+
+// A till left alone locks itself after IDLE_LOCK_MINUTES with no tap, key or
+// scan, the same as Take a break: the shift stays open and the next person
+// signs in with their own password. Anything half done is closed first;
+// nothing is charged.
+const IDLE_LOCK_MINUTES = 10;
+let lastInput = Date.now();
+let lastSaved = 0;
+for (const type of ['pointerdown', 'keydown']) {
+  document.addEventListener(type, () => {
+    lastInput = Date.now();
+    // Kept on the device too (every 30 seconds at most), for the check at startup.
+    if (session.user && lastInput - lastSaved > 30_000) {
+      lastSaved = lastInput;
+      setSyncMeta('last_active_at', lastInput).catch(() => {});
+    }
+  }, { capture: true, passive: true });
+}
+
+setInterval(async () => {
+  if (!session.user || Date.now() - lastInput < IDLE_LOCK_MINUTES * 60_000) return;
+  lastInput = Date.now();
+  cancelCheckout();
+  [...document.querySelectorAll('.overlay:not([hidden])')].reverse().forEach((overlay) => {
+    const close = overlay.querySelector('[data-close]');
+    if (close) close.click();
+    else overlay.hidden = true;
+  });
+  log('screen_locked', { details: { reason: 'idle' } });
+  await signOut();
+  toast(`Locked after ${IDLE_LOCK_MINUTES} minutes without use. The shift is still open.`);
+}, 30_000);
 
 $('endShiftBtn').addEventListener('click', async () => {
   closeModal('signOutOverlay');

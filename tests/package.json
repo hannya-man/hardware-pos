@@ -1,0 +1,17 @@
+{
+  "name": "caidic-pos-tests",
+  "private": true,
+  "type": "module",
+  "description": "Checks for the server functions (on real Postgres via PGlite), the app's sync code, and the service worker. Run with npm test.",
+  "scripts": {
+    "test": "node sql.test.mjs && node app.test.mjs && node sw.test.mjs && node ui.test.mjs"
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.10",
+    "bcryptjs": "3.0.3",
+    "dexie": "4.4.6",
+    "fake-indexeddb": "6.2.5",
+    "jsdom": "30.1.1",
+    "qrcode": "1.5.4"
+  }
+}

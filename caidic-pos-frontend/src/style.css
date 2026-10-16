@@ -264,6 +264,8 @@ input.input::-webkit-search-cancel-button {
 .page-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 20px; }
 
 .table-wrap { margin: 0 -20px -20px; overflow-x: auto; border-radius: 0 0 var(--radius-lg) var(--radius-lg); }
+/* "Show more" under a long list; the table above bleeds 20px into the card's padding. */
+.table-more { display: flex; justify-content: center; padding-top: 36px; }
 .table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .table th {
   padding: 10px 16px; text-align: left; white-space: nowrap;
@@ -469,6 +471,8 @@ input.input::-webkit-search-cancel-button {
 .status-pill .dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 3px rgba(21, 128, 61, 0.15); }
 .status-pill.offline { background: var(--warn-soft); color: var(--warn); }
 .status-pill.offline .dot { box-shadow: 0 0 0 3px rgba(161, 98, 7, 0.15); }
+.status-pill.attention { background: var(--bad-soft); color: var(--bad); }
+.status-pill.attention .dot { box-shadow: 0 0 0 3px rgba(185, 28, 28, 0.15); }
 
 .tip { position: relative; display: inline-flex; }
 .tip-body {

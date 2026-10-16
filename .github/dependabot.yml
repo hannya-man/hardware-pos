@@ -1,0 +1,16 @@
+# Weekly pull requests for package and GitHub Actions updates, including
+# security fixes. Each one runs the tests before anyone merges it.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /caidic-pos-frontend
+    schedule:
+      interval: weekly
+  - package-ecosystem: npm
+    directory: /tests
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
