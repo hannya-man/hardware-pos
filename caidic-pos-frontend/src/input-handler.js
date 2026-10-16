@@ -3,7 +3,7 @@
 // catalog, so none of it needs the internet.
 
 import bcrypt from 'bcryptjs';
-import { db } from './local-db.js';
+import { db, getSyncMeta, setSyncMeta } from './local-db.js';
 
 // A missing is_active counts as active; only an explicit false hides an item.
 const isSellable = (p) => p?.is_active !== false;
@@ -102,24 +102,31 @@ export async function makeCartLine(productId) {
 // ask for the PIN again (see session.js).
 // ---------------------------------------------------------------------------
 
+// Five wrong in a row lock the account on this device for a minute, then the
+// count starts over (the same rule as the server). The counts are kept on the
+// device, so reloading the page doesn't start them over.
 const MAX_LOGIN_ATTEMPTS = 5;
 const LOGIN_LOCKOUT_MS = 60_000;
-const attempts = new Map(); // user id -> { count, lockedUntil }
 
 export async function verifyStaffLogin(userId, pin) {
   const now = Date.now();
   const user = await db.users.get(userId);
   if (!user || user.is_active === false) return { approved: false, user: null };
 
-  const state = attempts.get(userId);
+  const attempts = await getSyncMeta('sign_in_attempts', {}); // user id -> { count, lockedUntil }
+  const state = attempts[userId];
   if (state?.lockedUntil > now) return { approved: false, user: null, locked: true };
 
   if (await bcrypt.compare(pin, user.pin_hash)) {
-    attempts.delete(userId);
+    if (state) {
+      delete attempts[userId];
+      await setSyncMeta('sign_in_attempts', attempts);
+    }
     return { approved: true, user };
   }
 
-  const count = (state?.count ?? 0) + 1;
-  attempts.set(userId, { count, lockedUntil: count >= MAX_LOGIN_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : null });
+  const count = (state?.lockedUntil ? 0 : state?.count ?? 0) + 1;
+  attempts[userId] = { count, lockedUntil: count >= MAX_LOGIN_ATTEMPTS ? now + LOGIN_LOCKOUT_MS : null };
+  await setSyncMeta('sign_in_attempts', attempts);
   return { approved: false, user: null, locked: count >= MAX_LOGIN_ATTEMPTS };
 }

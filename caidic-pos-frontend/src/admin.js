@@ -6,12 +6,12 @@
 import QRCode from 'qrcode';
 import {
   flushOutbox, fetchSales, fetchShifts, fetchShift, submitReturn,
-  fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor,
+  fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor, fetchAuditLog,
 } from './sync-worker.js';
 import { withServerAuth } from './session.js';
 import { askToVoid, openVoidRequest } from './voids.js';
 import {
-  $, esc, peso, qty, fmtTime, fmtDate, humanize, badge, avatar, setStatus, showSelected, countTo,
+  $, esc, peso, qty, fmtTime, fmtDate, fmtDateTime, humanize, badge, avatar, setStatus, showSelected, countTo,
   tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast,
 } from './ui.js';
 
@@ -43,42 +43,82 @@ function periodStart(period) {
   return start.toISOString();
 }
 
+// Long lists arrive a page at a time (100 sales, 50 shifts, 200 audit
+// events). "Show more" under the table adds the next page.
+function showMore(buttonId, result, shown) {
+  const left = Math.max(0, Number(result?.total ?? 0) - shown);
+  $(buttonId).parentElement.hidden = left === 0;
+  $(buttonId).textContent = `Show more (${left} left)`;
+}
+
+const addPage = (rows, more) => {
+  const have = new Set(rows.map((r) => r.id));
+  return rows.concat(more.filter((r) => !have.has(r.id))); // a new entry can shift a page by one
+};
+
+async function loadMore(buttonId, load) {
+  $(buttonId).disabled = true;
+  try {
+    await load();
+  } catch (err) {
+    toast(`Couldn't load more. ${err.message}`, 'error');
+  } finally {
+    $(buttonId).disabled = false;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // SALES
 // ---------------------------------------------------------------------------
 
 let salesPeriod = 'today';
 let sales = [];
+let salesPage = 1;
 let openSaleRow = null;
+
+const saleRow = (s) => `
+  <tr class="is-clickable${s.status === 'completed' ? '' : ' is-muted'}" data-action="open" data-id="${esc(s.id)}">
+    <td class="nowrap">${fmtTime(s.client_created_at)}</td>
+    <td>${itemsSummary(s.items)}</td>
+    <td>${esc(paymentLabel(s))}</td>
+    <td>${esc(s.cashier?.full_name ?? '—')}</td>
+    <td class="num"><strong>${peso(s.total_amount)}</strong>${s.status !== 'completed'
+      ? `<span class="cell-sub">${badge(humanize(s.status), 'bad')}</span>`
+      : s.pending_void ? `<span class="cell-sub">${badge('Void waiting', 'warn')}</span>` : ''}</td>
+  </tr>`;
+
+function drawSales(result) {
+  renderRows('salesTable', sales, saleRow, 'No sales in this period yet.');
+  showMore('salesMoreBtn', result, sales.length);
+}
 
 export async function renderSales() {
   $('salesPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === salesPeriod));
   tableMessage('salesTable', 'Loading…');
+  showMore('salesMoreBtn', null, 0);
   await flushOutbox().catch(() => {}); // include sales made on this device moments ago
   try {
     const result = await withServerAuth(() => fetchSales({ from: periodStart(salesPeriod) }));
     sales = rowsOf(result);
+    salesPage = 1;
     const totals = result.totals ?? {};
     const sum = (...methods) => methods.reduce((t, m) => t + Number(totals[m] ?? 0), 0);
     countTo($('salesTotal'), Object.values(totals).reduce((t, v) => t + Number(v), 0));
     countTo($('salesCash'), sum('cash'));
     countTo($('salesDigital'), sum('gcash', 'bank', 'card', 'other'));
     countTo($('salesCredit'), sum('credit'));
-
-    renderRows('salesTable', sales, (s) => `
-      <tr class="is-clickable${s.status === 'completed' ? '' : ' is-muted'}" data-action="open" data-id="${esc(s.id)}">
-        <td class="nowrap">${fmtTime(s.client_created_at)}</td>
-        <td>${itemsSummary(s.items)}</td>
-        <td>${esc(paymentLabel(s))}</td>
-        <td>${esc(s.cashier?.full_name ?? '—')}</td>
-        <td class="num"><strong>${peso(s.total_amount)}</strong>${s.status !== 'completed'
-          ? `<span class="cell-sub">${badge(humanize(s.status), 'bad')}</span>`
-          : s.pending_void ? `<span class="cell-sub">${badge('Void waiting', 'warn')}</span>` : ''}</td>
-      </tr>`, 'No sales in this period yet.');
+    drawSales(result);
   } catch (err) {
     tableMessage('salesTable', `Couldn't load. ${err.message}`);
   }
 }
+
+$('salesMoreBtn').addEventListener('click', () => loadMore('salesMoreBtn', async () => {
+  const result = await withServerAuth(() => fetchSales({ from: periodStart(salesPeriod), page: salesPage + 1 }));
+  salesPage = result.current_page;
+  sales = addPage(sales, rowsOf(result));
+  drawSales(result);
+}));
 
 $('salesPeriod').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-period]');
@@ -143,12 +183,12 @@ let shiftData = null;
 
 const STEP_EVENTS = new Set(['item_added', 'barcode_scanned', 'view_opened']); // only with "Show every step"
 const SHOWN_FROM_RECORDS = new Set(['shift_started', 'shift_ended', 'sale_completed', 'credit_payment_received']);
-const SCREEN_NAMES = { dashboard: 'Dashboard', billing: 'Sell', credit: 'Credit', materialRequests: 'Pick lists', stock: 'Stock', sales: 'Sales', shifts: 'Shifts', returns: 'Returns', staff: 'Staff' };
+const SCREEN_NAMES = { dashboard: 'Dashboard', billing: 'Sell', credit: 'Credit', materialRequests: 'Pick lists', stock: 'Stock', sales: 'Sales', shifts: 'Shifts', returns: 'Returns', staff: 'Staff', audit: 'Audit log' };
 
 const EVENT_TEXT = {
   login: () => 'Signed back in',
   session_resumed: () => 'Reopened the POS',
-  screen_locked: () => 'Took a break',
+  screen_locked: (d) => (d.reason === 'idle' ? 'Locked after 10 minutes without use' : 'Took a break'),
   logout: () => 'Signed out',
   view_opened: (d) => `Opened ${SCREEN_NAMES[d.view] ?? 'a screen'}`,
   item_added: (d) => `Added ${d.name ?? 'an item'} to the order`,
@@ -181,31 +221,50 @@ const EVENT_TEXT = {
 };
 const describe = (a) => EVENT_TEXT[a.event_type]?.(a.details ?? {}) ?? humanize(a.event_type);
 
+let shiftsPage = 1;
+
+function shiftRow(s) {
+  const diff = s.cash_discrepancy == null ? null : Number(s.cash_discrepancy);
+  return `
+    <tr class="is-clickable" data-action="open" data-id="${esc(s.id)}">
+      <td>${personCell(s.cashier)}</td>
+      <td class="nowrap">${fmtTime(s.started_at)}</td>
+      <td class="nowrap">${s.ended_at ? fmtTime(s.ended_at) : '—'}</td>
+      <td class="num">${duration(s.started_at, s.ended_at)}</td>
+      <td class="num">${peso(s.sales_total ?? 0)}<span class="cell-sub">${s.sales_count} sale${s.sales_count === 1 ? '' : 's'}</span></td>
+      <td class="num${diff ? ' text-bad' : ''}">${diff == null ? '—' : diff === 0 ? 'None' : signed(diff)}</td>
+      <td>${s.status === 'open' ? badge('On shift', 'info') : badge('Ended')}</td>
+    </tr>`;
+}
+
+function drawShifts(result) {
+  renderRows('shiftsTable', shifts, shiftRow, 'No shifts yet.');
+  showMore('shiftsMoreBtn', result, shifts.length);
+}
+
 export async function renderShifts() {
   $('shiftDetail').hidden = true;
   $('shiftsListCard').hidden = false;
   await fillStaffFilter();
   tableMessage('shiftsTable', 'Loading…');
+  showMore('shiftsMoreBtn', null, 0);
   await flushOutbox().catch(() => {});
   try {
-    shifts = rowsOf(await withServerAuth(() => fetchShifts({ cashier_id: $('shiftStaffFilter').value })));
-    renderRows('shiftsTable', shifts, (s) => {
-      const diff = s.cash_discrepancy == null ? null : Number(s.cash_discrepancy);
-      return `
-        <tr class="is-clickable" data-action="open" data-id="${esc(s.id)}">
-          <td>${personCell(s.cashier)}</td>
-          <td class="nowrap">${fmtTime(s.started_at)}</td>
-          <td class="nowrap">${s.ended_at ? fmtTime(s.ended_at) : '—'}</td>
-          <td class="num">${duration(s.started_at, s.ended_at)}</td>
-          <td class="num">${peso(s.sales_total ?? 0)}<span class="cell-sub">${s.sales_count} sale${s.sales_count === 1 ? '' : 's'}</span></td>
-          <td class="num${diff ? ' text-bad' : ''}">${diff == null ? '—' : diff === 0 ? 'None' : signed(diff)}</td>
-          <td>${s.status === 'open' ? badge('On shift', 'info') : badge('Ended')}</td>
-        </tr>`;
-    }, 'No shifts yet.');
+    const result = await withServerAuth(() => fetchShifts({ cashier_id: $('shiftStaffFilter').value }));
+    shifts = rowsOf(result);
+    shiftsPage = 1;
+    drawShifts(result);
   } catch (err) {
     tableMessage('shiftsTable', `Couldn't load. ${err.message}`);
   }
 }
+
+$('shiftsMoreBtn').addEventListener('click', () => loadMore('shiftsMoreBtn', async () => {
+  const result = await withServerAuth(() => fetchShifts({ cashier_id: $('shiftStaffFilter').value, page: shiftsPage + 1 }));
+  shiftsPage = result.current_page;
+  shifts = addPage(shifts, rowsOf(result));
+  drawShifts(result);
+}));
 
 async function fillStaffFilter() {
   const select = $('shiftStaffFilter');
@@ -285,19 +344,29 @@ function drawTimeline() {
     </li>`).join('');
 }
 
-const csvCell = (value) => `"${String(value ?? '').replace(/"/g, '""')}"`;
+// A cell starting with = + - @ would run as a formula when opened in Excel or
+// Google Sheets (a customer named "=HYPERLINK(...)", say); a leading ' keeps
+// it plain text.
+const csvCell = (value) => {
+  const text = String(value ?? '');
+  return `"${(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text).replace(/"/g, '""')}"`;
+};
 
-$('shiftDownloadBtn').addEventListener('click', () => {
-  const lines = [['Time', 'What happened', 'Details'], ...timelineEntries().map((e) => [fmtTime(e.at), e.title, e.sub])]
-    .map((cells) => cells.map(csvCell).join(','));
+// Saves rows (the first one is the header) as a CSV file.
+function downloadCsv(filename, rows) {
   const link = document.createElement('a');
-  link.href = URL.createObjectURL(new Blob([lines.join('\r\n')], { type: 'text/csv;charset=utf-8;' }));
-  const who = (shiftData.shift.cashier?.full_name ?? 'shift').toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  link.download = `${who}-${shiftData.shift.started_at.slice(0, 10)}.csv`;
+  link.href = URL.createObjectURL(new Blob([rows.map((cells) => cells.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8;' }));
+  link.download = filename;
   document.body.append(link);
   link.click();
   link.remove();
   setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+$('shiftDownloadBtn').addEventListener('click', () => {
+  const who = (shiftData.shift.cashier?.full_name ?? 'shift').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  downloadCsv(`${who}-${shiftData.shift.started_at.slice(0, 10)}.csv`,
+    [['Time', 'What happened', 'Details'], ...timelineEntries().map((e) => [fmtTime(e.at), e.title, e.sub])]);
 });
 
 // ---------------------------------------------------------------------------
@@ -516,3 +585,78 @@ async function confirmTwoFa() {
 
 $('twoFaConfirmBtn').addEventListener('click', confirmTwoFa);
 $('twoFaConfirmCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTwoFa(); });
+
+// ---------------------------------------------------------------------------
+// AUDIT LOG (owners): events that need an owner's eyes, newest first. The
+// download is the record to keep (or show an auditor).
+// ---------------------------------------------------------------------------
+
+let auditPeriod = 'today';
+let auditRows = [];
+let auditPage = 1;
+
+const AUDIT_TEXT = {
+  failed_pin_attempt: (a, d) => `Wrong ${d.step === 'code' ? 'authenticator code' : 'password'} for ${a.subject ?? 'an account'}${d.locked ? '. The account is locked for a minute.' : ''}`,
+  shift_close_discrepancy: (a, d) => `Cash ${Number(d.cash_discrepancy) < 0 ? 'short' : 'over'} by ${peso(Math.abs(Number(d.cash_discrepancy)))} at the end of ${a.subject ? `${a.subject}'s` : 'a'} shift`,
+  admin_void: (a, d) => `Voided sale ${a.subject ?? ''} of ${peso(d.total_amount)}: “${d.reason ?? ''}”`,
+  batch_oversold: (a, d) => `Sold ${qty(d.oversold_by)} more ${a.subject ?? 'of an item'} than the stock count showed`,
+  return_accepted: (a, d) => `Return accepted: ${qty(d.quantity_returned)} × ${a.subject ?? 'an item'} (${d.condition ?? ''})`,
+  manual_stock_adjustment: (a, d) => `Couldn't take ${qty(d.short_by)} ${a.subject ?? 'of an item'} out of the ${d.location ?? 'store'}: not enough in stock`,
+  timestamp_anomaly_clamped: (a) => `A delivery of ${a.subject ?? 'an item'} was dated in the future (a device's clock is wrong), so its date was corrected`,
+  customer_anonymized: () => "A customer's name and phone number were removed on request",
+};
+const describeAudit = (a) => AUDIT_TEXT[a.action_type]?.(a, a.details ?? {}) ?? humanize(a.action_type);
+const auditWho = (a) => [a.actor?.full_name, a.approver && a.approver.id !== a.actor?.id ? `approved by ${a.approver.full_name}` : null]
+  .filter(Boolean).join(', ') || '—';
+
+const auditRow = (a) => `
+  <tr>
+    <td class="nowrap">${fmtTime(a.client_created_at)}</td>
+    <td>${esc(describeAudit(a))}</td>
+    <td>${esc(auditWho(a))}</td>
+    <td class="nowrap">${esc(a.ip_address ?? '—')}</td>
+  </tr>`;
+
+function drawAudit(result) {
+  renderRows('auditTable', auditRows, auditRow, 'Nothing to review in this period.');
+  showMore('auditMoreBtn', result, auditRows.length);
+}
+
+const auditFilters = (page) => ({ from: periodStart(auditPeriod), action_type: $('auditType').value, page });
+
+export async function renderAudit() {
+  $('auditPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === auditPeriod));
+  tableMessage('auditTable', 'Loading…');
+  showMore('auditMoreBtn', null, 0);
+  await flushOutbox().catch(() => {}); // include wrong passwords tried on this device moments ago
+  try {
+    const result = await withServerAuth(() => fetchAuditLog(auditFilters(1)));
+    auditRows = rowsOf(result);
+    auditPage = 1;
+    drawAudit(result);
+  } catch (err) {
+    tableMessage('auditTable', `Couldn't load. ${err.message}`);
+  }
+}
+
+$('auditMoreBtn').addEventListener('click', () => loadMore('auditMoreBtn', async () => {
+  const result = await withServerAuth(() => fetchAuditLog(auditFilters(auditPage + 1)));
+  auditPage = result.current_page;
+  auditRows = addPage(auditRows, rowsOf(result));
+  drawAudit(result);
+}));
+
+$('auditPeriod').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-period]');
+  if (!btn) return;
+  auditPeriod = btn.dataset.period;
+  renderAudit();
+});
+$('auditType').addEventListener('change', renderAudit);
+
+$('auditDownloadBtn').addEventListener('click', () => {
+  downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, [
+    ['Time', 'What happened', 'Who', 'From', 'Kind'],
+    ...auditRows.map((a) => [fmtDateTime(a.client_created_at), describeAudit(a), auditWho(a), a.ip_address ?? '', a.action_type]),
+  ]);
+});

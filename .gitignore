@@ -10,6 +10,13 @@ node_modules/
 dist/
 .vite/
 
+# Copies of the app's modules made by the tests
+tests/.app-under-test/
+tests/.app-under-test-ui/
+
+# Decrypted database backups (keep them off the repository)
+pos-backup-*
+
 # OS/editor cruft
 .DS_Store
 .vscode/

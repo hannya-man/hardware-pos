@@ -18,8 +18,10 @@ Set it up once, in this order.
    query and click **Run**, in this order:
    1. `supabase/migrations/20261015000000_pos_schema.sql`: the tables
    2. `supabase/migrations/20261015000001_pos_api.sql`: the server functions
-   3. `supabase/seed.sql`: the 12 categories and 194 items
-   4. `supabase/starting-stock.sql` (optional): 100 of each item in the store,
+   3. `supabase/migrations/20261016000000_security_controls.sql`: audit log
+      additions
+   4. `supabase/seed.sql`: the 12 categories and 194 items
+   5. `supabase/starting-stock.sql` (optional): 100 of each item in the store,
       like the local test setup. Skip it if you'll enter real counts on the
       Stock screen.
 3. Still in the SQL Editor, add the owners and register the first device:
@@ -47,12 +49,31 @@ In the repository on github.com:
    - `SUPABASE_PUBLISHABLE_KEY`: the publishable key
 2. **Settings > Pages > Build and deployment > Source**: choose
    **GitHub Actions**.
+3. **Backups.** Supabase's free plan keeps no backups, so the **Nightly
+   backup** workflow makes them, encrypted. Add two more secrets:
+   - `SUPABASE_DB_URL`: in Supabase, **Connect → Session pooler**. Copy the
+     connection string and put the database password in place of
+     `[YOUR-PASSWORD]`. (Forgot the password? Reset it under **Settings >
+     Database**.)
+   - `BACKUP_PASSPHRASE`: a long random passphrase, for example five or six
+     random words. Keep it in a password manager **and** sealed in the store's
+     safe: without it the backups can't be opened.
+
+   Then open **Actions → Nightly backup → Run workflow** once to check that
+   it works. After that it runs every night at 02:00.
+4. **Protection** (needs the repository owner's account):
+   - **Settings > Branches**: add a rule for `main` that requires the **test**
+     check to pass before merging.
+   - **Settings**, security section (**Code security**, or **Advanced
+     Security** on newer accounts): turn on **Dependabot alerts** and
+     **Private vulnerability reporting**.
 
 ## 3. Publish
 
 Commit and push to `main`. The **Deploy to GitHub Pages** workflow (Actions
-tab) builds the app and publishes it in about a minute. Every later push to
-`main` publishes again; **Run workflow** on the Actions tab does it by hand.
+tab) runs the tests, builds the app and publishes it in a few minutes. Every
+later push to `main` publishes again, but only if the tests pass; **Run
+workflow** on the Actions tab does it by hand.
 
 ## 4. Each device
 
@@ -89,6 +110,13 @@ uses the same Supabase project as the published site.
 - **Changing the server logic.** Edit
   `supabase/migrations/20261015000001_pos_api.sql` and run it again in the SQL
   Editor; every function in it is replaced in place. Table changes go in a new,
-  dated file in `supabase/migrations`.
+  dated file in `supabase/migrations`. Run `npm test` in `tests/` first; the
+  checks run on a throwaway database, never the live one.
+- **Bringing an existing project up to date.** When a new dated file appears in
+  `supabase/migrations`, run it once in the SQL Editor, then run the API file
+  again.
 - **The store's time zone** for "today" and "this week" is set in
   `pos.store_timezone()` (Asia/Manila).
+- **ISO standards.** What the system does for ISO/IEC 27001, 27017, 22301,
+  20000-1 and ISO 9001, and what's left for the store, is in
+  [docs/compliance](docs/compliance/README.md).

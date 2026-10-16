@@ -135,6 +135,21 @@ export async function logActivity({ actor_id, shift_id = null, event_type, entit
   });
 }
 
+// A wrong password or authenticator code at the sign-in screen, for the
+// owners' Audit log. Checked on this device, so it's recorded here and sent
+// up like a sale: a till that's offline still reports it.
+export async function recordFailedSignIn({ user_id, step, locked = false }) {
+  const audit = {
+    id: crypto.randomUUID(), terminal_id: await getTerminalId(), actor_id: null, approver_id: null,
+    action_type: 'failed_pin_attempt', entity_type: 'user', entity_id: user_id,
+    details: { step, locked, checked: 'device' }, client_created_at: nowIso(),
+  };
+  await db.transaction('rw', db.audit_logs, db.outbox_queue, async () => {
+    await db.audit_logs.add(audit);
+    await enqueue('audit_log', audit.id, audit);
+  });
+}
+
 // FIFO: each sale line draws from this device's copy of the store's batches,
 // oldest first, and tags every movement with the batch it came from (that is
 // what lets a later void put the stock back). A shortfall (stale copy or a
@@ -406,6 +421,8 @@ export const setupTwoFactor = (id) => rpc('pos_two_factor_setup', { id });
 export const verifyTwoFactor = (id, code) => rpc('pos_two_factor_verify', { id, code });
 export const disableTwoFactor = (id) => rpc('pos_two_factor_disable', { id });
 
+export const fetchAuditLog = (params) => rpc('pos_audit_log', filters(params));
+
 // ---------------------------------------------------------------------------
 // Connectivity, outbox push, catalog pull
 // ---------------------------------------------------------------------------
@@ -459,11 +476,20 @@ export function flushOutbox(options = {}) {
         flushAgain = false;
         await pushPending(options);
       } while (flushAgain);
+      await reportUnsynced();
     } finally {
       flushing = null;
     }
   })();
   return flushing;
+}
+
+// Records the server refused MAX_RETRY_COUNT times stop retrying on their
+// own. They're never silent: the count goes to the screen (the status pill)
+// until Sync now gets them through or an owner looks into it.
+let onUnsynced = null;
+async function reportUnsynced() {
+  onUnsynced?.(await db.outbox_queue.where('status').equals('failed').count());
 }
 
 async function pushPending({ onNeedsProvisioning } = {}) {
@@ -537,8 +563,10 @@ export async function pullCatalog({ fresh = false } = {}) {
 
 export const forceFullSync = () => pullCatalog({ fresh: true });
 
-export function startSyncWorker({ onStatusChange, onNeedsProvisioning } = {}) {
+export function startSyncWorker({ onStatusChange, onNeedsProvisioning, onUnsynced: reportTo } = {}) {
   let online = null;
+  onUnsynced = reportTo ?? null;
+  reportUnsynced();
 
   const recheck = async () => {
     const now = await isServerReachable();

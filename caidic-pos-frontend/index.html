@@ -64,7 +64,7 @@
       <div class="topbar-actions">
         <span class="tip">
           <span id="statusPill" class="status-pill" tabindex="0"><span class="dot"></span><span id="statusLabel">Checking…</span></span>
-          <span class="tip-body tip-right" role="tooltip"><b>Online:</b> sales save to the cloud right away.<br><b>Offline:</b> keep selling. Sales upload on their own once the internet is back.</span>
+          <span class="tip-body tip-right" role="tooltip"><b>Online:</b> sales save to the cloud right away.<br><b>Offline:</b> keep selling. Sales upload on their own once the internet is back.<br><b>Not synced:</b> the server refused some records. Tap Sync now; if the number stays, tell an owner.</span>
         </span>
         <button type="button" id="syncNowBtn" class="btn btn-sm"><span data-icon="sync"></span>Sync now</button>
       </div>
@@ -244,6 +244,7 @@
               <tbody></tbody>
             </table>
           </div>
+          <div class="table-more" hidden><button type="button" class="btn btn-sm" id="salesMoreBtn">Show more</button></div>
         </div>
       </section>
 
@@ -260,6 +261,7 @@
               <tbody></tbody>
             </table>
           </div>
+          <div class="table-more" hidden><button type="button" class="btn btn-sm" id="shiftsMoreBtn">Show more</button></div>
         </div>
         <div class="stack" id="shiftDetail" hidden>
           <div class="card">
@@ -324,7 +326,7 @@
               <label for="usrRole">Role</label>
               <select id="usrRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
             </div>
-            <div class="field"><label for="usrPin">User password</label><input id="usrPin" class="input" type="text" inputmode="numeric" autocomplete="off"></div>
+            <div class="field"><label for="usrPin">User password</label><input id="usrPin" class="input" type="password" inputmode="numeric" autocomplete="new-password"></div>
             <button type="button" class="btn btn-primary" id="usrAddBtn">Add</button>
           </div>
           <p id="usrStatus" class="form-status"></p>
@@ -340,6 +342,42 @@
               <tbody></tbody>
             </table>
           </div>
+        </div>
+      </section>
+
+      <!-- Audit log: events that need an owner's eyes -->
+      <section id="viewAudit" class="view stack" hidden>
+        <div class="page-toolbar">
+          <div class="segmented" id="auditPeriod">
+            <button type="button" data-period="today" class="active">Today</button>
+            <button type="button" data-period="week">This week</button>
+            <button type="button" data-period="month">This month</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="toolbar">
+            <select id="auditType" class="input input-auto" aria-label="Kind of event">
+              <option value="">Everything</option>
+              <option value="failed_pin_attempt">Wrong passwords</option>
+              <option value="shift_close_discrepancy">Cash differences</option>
+              <option value="admin_void">Voided sales</option>
+              <option value="batch_oversold">Sold more than in stock</option>
+              <option value="return_accepted">Returns</option>
+              <option value="manual_stock_adjustment">Counts below zero</option>
+              <option value="timestamp_anomaly_clamped">Wrong device clock</option>
+              <option value="customer_anonymized">Customer details removed</option>
+            </select>
+            <div class="toolbar-end">
+              <button type="button" class="btn btn-sm" id="auditDownloadBtn"><span data-icon="download"></span>Download</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="table table-anim" id="auditTable">
+              <thead><tr><th>Time</th><th>What happened</th><th>Who</th><th>From</th></tr></thead>
+              <tbody></tbody>
+            </table>
+          </div>
+          <div class="table-more" hidden><button type="button" class="btn btn-sm" id="auditMoreBtn">Show more</button></div>
         </div>
       </section>
 
@@ -645,7 +683,7 @@
       <label for="editStaffRole">Role</label>
       <select id="editStaffRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
     </div>
-    <div class="field"><label for="editStaffPin">New user password <span class="optional">leave blank to keep the current one</span></label><input id="editStaffPin" class="input" type="text" inputmode="numeric" autocomplete="off"></div>
+    <div class="field"><label for="editStaffPin">New user password <span class="optional">leave blank to keep the current one</span></label><input id="editStaffPin" class="input" type="password" inputmode="numeric" autocomplete="new-password"></div>
     <div class="field" id="editStaffTwoFaSection" hidden>
       <span class="label">Two-factor login</span>
       <div class="setting-row">

@@ -162,7 +162,10 @@ begin
 end $$;
 
 -- A person's server sign-in, made by pos_login from the password they typed
--- at the till. A deactivated account is refused even with an older token.
+-- at the till. It lasts at most 12 hours (a long shift) and ends after 2
+-- hours unused; the app then signs in again with the password typed at the
+-- till, or asks for it. A deactivated account is refused even with an older
+-- token.
 create or replace function pos.require_user(p_auth jsonb) returns public.users
 language plpgsql set search_path = '' as $$
 declare
@@ -173,6 +176,9 @@ begin
   where t.token_hash = pos.sha256_hex(coalesce(p_auth ->> 'token', ''));
   if not found then
     perform pos.fail(401, 'Not signed in to the server');
+  end if;
+  if v_token.created_at < now() - interval '12 hours' or v_token.last_used_at < now() - interval '2 hours' then
+    perform pos.fail(401, 'Your server sign-in expired');
   end if;
   select * into v_user from public.users u where u.id = v_token.user_id and u.is_active;
   if not found then
@@ -243,8 +249,10 @@ end $$;
 -- Checks a typed password. Five wrong in a row lock the account for a
 -- minute, then the count starts over. Returns null when it's right, or the
 -- message to show. Callers hand that message back instead of raising it, so
--- the count of wrong tries is saved rather than rolled back.
-create or replace function pos.check_pin(p_user_id uuid, p_pin text) returns text
+-- the count of wrong tries, and the audit entry for each, are saved rather
+-- than rolled back.
+drop function if exists pos.check_pin(uuid, text);
+create or replace function pos.check_pin(p_user_id uuid, p_pin text, p_auth jsonb default '{}'::jsonb) returns text
 language plpgsql set search_path = '' as $$
 declare
   v_user public.users;
@@ -255,6 +263,9 @@ begin
     return 'That password isn''t right — try again.';
   end if;
   if v_user.locked_until > now() then
+    insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
+    values (coalesce(nullif(p_auth ->> 'terminal_id', ''), 'unknown'), 'failed_pin_attempt', 'user', v_user.id,
+            jsonb_build_object('step', 'password', 'locked', true, 'checked', 'server'), now());
     return 'Too many attempts — try again in a minute.';
   end if;
   if not pos.pin_matches(p_pin, v_user.pin_hash) then
@@ -263,6 +274,9 @@ begin
     set failed_pin_attempts = v_attempts,
         locked_until = case when v_attempts >= 5 then now() + interval '1 minute' end
     where id = v_user.id;
+    insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
+    values (coalesce(nullif(p_auth ->> 'terminal_id', ''), 'unknown'), 'failed_pin_attempt', 'user', v_user.id,
+            jsonb_build_object('step', 'password', 'attempt', v_attempts, 'locked', v_attempts >= 5, 'checked', 'server'), now());
     return 'That password isn''t right — try again.';
   end if;
   if v_user.failed_pin_attempts > 0 or v_user.locked_until is not null then
@@ -485,6 +499,20 @@ language sql stable set search_path = '' as $$
              from public.sales s where s.id = p_request.sale_id))
 $$;
 
+-- What an audit event is about, in words: the person, item, shift or sale.
+create or replace function pos.audit_subject(p_type text, p_id uuid) returns text
+language sql stable set search_path = '' as $$
+  select case p_type
+    when 'user' then (select u.full_name from public.users u where u.id = p_id)
+    when 'product' then (select p.name from public.products p where p.id = p_id)
+    when 'stock_batch' then (select p.name from public.stock_batches b join public.products p on p.id = b.product_id where b.id = p_id)
+    when 'sales_return' then (select p.name from public.sales_returns r join public.products p on p.id = r.product_id where r.id = p_id)
+    when 'shift_log' then (select u.full_name from public.shift_logs s join public.users u on u.id = s.cashier_id where s.id = p_id)
+    when 'customer' then (select c.name from public.customers c where c.id = p_id)
+    when 'sale' then upper(left(p_id::text, 8))
+  end
+$$;
+
 -- Laravel's paginate() shape, which the screens read .data from.
 create or replace function pos.page_json(p_rows jsonb, p_total bigint, p_page integer, p_per_page integer) returns jsonb
 language sql immutable set search_path = '' as $$
@@ -647,6 +675,63 @@ end $$;
 -- Sync push: what terminals saved offline
 -- ===========================================================================
 
+-- A sale from a terminal has to hang together before it's accepted. The
+-- terminal can't decide a sale is voided (voids need two owners), its total
+-- must be what its lines add up to, and its stock movements must belong to
+-- it. The app always sends sales like this; anything else was tampered with
+-- or broken, and is refused (the terminal then shows it as not synced).
+create or replace function pos.check_sale(p_payload jsonb) returns void
+language plpgsql set search_path = '' as $$
+declare
+  v_sale jsonb := p_payload -> 'sale';
+  v_id text := p_payload -> 'sale' ->> 'id';
+  v_total numeric := (p_payload -> 'sale' ->> 'total_amount')::numeric;
+  v_lines numeric;
+  v_problem text;
+begin
+  if coalesce(v_sale ->> 'status', 'completed') <> 'completed'
+     or v_sale ->> 'voided_by' is not null or v_sale ->> 'void_reason' is not null then
+    raise exception 'A sale arrives as completed; voiding it needs two owners.';
+  end if;
+  if jsonb_typeof(p_payload -> 'items') is distinct from 'array' or jsonb_array_length(p_payload -> 'items') = 0 then
+    raise exception 'A sale needs at least one line.';
+  end if;
+
+  select case
+      when bool_or(i ->> 'sale_id' is distinct from v_id) then 'A sale line belongs to another sale.'
+      when bool_or(coalesce((i ->> 'quantity')::numeric, 0) <= 0) then 'A sale line has no quantity.'
+      when bool_or(abs((i ->> 'unit_price_snapshot')::numeric * (i ->> 'quantity')::numeric
+                       - coalesce((i ->> 'line_discount')::numeric, 0) - (i ->> 'line_total')::numeric) > 0.01)
+        then 'A sale line''s total doesn''t match its price and quantity.'
+    end,
+    sum((i ->> 'line_total')::numeric)
+  into v_problem, v_lines
+  from jsonb_array_elements(p_payload -> 'items') as i;
+  if v_problem is not null then
+    raise exception '%', v_problem;
+  end if;
+  if v_total is null or abs(v_lines - v_total) > 0.01 then
+    raise exception 'The sale''s total doesn''t match its lines.';
+  end if;
+
+  if v_sale ->> 'payment_method' = 'credit' and v_sale ->> 'customer_id' is null then
+    raise exception 'A credit sale needs its customer.';
+  end if;
+  if coalesce((v_sale ->> 'amount_paid')::numeric, v_total) not between 0 and v_total + 0.01 then
+    raise exception 'The amount paid is more than the sale.';
+  end if;
+
+  if exists (
+    select 1 from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) as m
+    where m ->> 'reference_id' is distinct from v_id
+       or coalesce(m ->> 'reason', 'sale') <> 'sale'
+       or coalesce((m ->> 'delta')::numeric, 0) >= 0
+       or not exists (select 1 from jsonb_array_elements(p_payload -> 'items') as i where i ->> 'product_id' = m ->> 'product_id'))
+  then
+    raise exception 'A stock movement doesn''t belong to this sale.';
+  end if;
+end $$;
+
 -- A completed sale is three things at once (the sale, its lines, and the
 -- stock it drew down), written together so stock is never taken without a
 -- sale or the reverse. The FIFO choice was made on the terminal; this applies
@@ -660,6 +745,8 @@ declare
   v_batch_id uuid;
   v_left numeric;
 begin
+  perform pos.check_sale(p_payload);
+
   insert into public.sales (id, terminal_id, cashier_id, shift_id, subtotal, discount_amount, tax_amount,
     total_amount, payment_method, amount_tendered, change_amount, amount_paid, payment_reference,
     customer_id, status, voided_by, void_reason, client_created_at)
@@ -755,6 +842,15 @@ begin
   if exists (select 1 from public.stock_batches b where b.id = v_id) then
     return;
   end if;
+  -- Terminals only receive deliveries: good plus damaged is what arrived.
+  if coalesce(p_payload ->> 'source', 'receiving') <> 'receiving'
+     or (p_payload ->> 'qty_received')::numeric <= 0
+     or (p_payload ->> 'qty_good_remaining')::numeric < 0
+     or coalesce((p_payload ->> 'qty_damaged')::numeric, 0) < 0
+     or abs((p_payload ->> 'qty_good_remaining')::numeric + coalesce((p_payload ->> 'qty_damaged')::numeric, 0)
+            - (p_payload ->> 'qty_received')::numeric) > 0.001 then
+    raise exception 'A delivery''s good and damaged counts must add up to what was received.';
+  end if;
 
   if v_received > now() + interval '6 hours' then
     insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
@@ -783,8 +879,10 @@ end $$;
 
 -- One outbox item. Logs, payments and pick lists are insert-only (a retried
 -- push is a no-op, never an overwrite; a pick list's status only changes
--- here). Shifts, customers and sale lines can change later on the terminal,
--- so their fields are updated, but only the ones the item carries.
+-- here). Shifts and customers can change later on the terminal, so their
+-- fields are updated, but only the ones the item carries. Each kind is
+-- checked against what the app sends, so a tampered terminal can't record
+-- what only the server or two owners may decide.
 create or replace function pos.push_one(p_type text, p_payload jsonb) returns void
 language plpgsql set search_path = '' as $$
 declare
@@ -834,28 +932,10 @@ begin
       values (v_id, p_payload ->> 'name', p_payload ->> 'phone', coalesce((p_payload ->> 'is_active')::boolean, true));
     end if;
 
-  when 'sale_item' then
-    update public.sale_items t set
-      sale_id = case when p_payload ? 'sale_id' then (p_payload ->> 'sale_id')::uuid else t.sale_id end,
-      product_id = case when p_payload ? 'product_id' then (p_payload ->> 'product_id')::uuid else t.product_id end,
-      sku_snapshot = case when p_payload ? 'sku_snapshot' then p_payload ->> 'sku_snapshot' else t.sku_snapshot end,
-      name_snapshot = case when p_payload ? 'name_snapshot' then p_payload ->> 'name_snapshot' else t.name_snapshot end,
-      unit_price_snapshot = case when p_payload ? 'unit_price_snapshot' then (p_payload ->> 'unit_price_snapshot')::numeric else t.unit_price_snapshot end,
-      quantity = case when p_payload ? 'quantity' then (p_payload ->> 'quantity')::numeric else t.quantity end,
-      line_discount = case when p_payload ? 'line_discount' then (p_payload ->> 'line_discount')::numeric else t.line_discount end,
-      line_total = case when p_payload ? 'line_total' then (p_payload ->> 'line_total')::numeric else t.line_total end,
-      voided_at = case when p_payload ? 'voided_at' then (p_payload ->> 'voided_at')::timestamptz else t.voided_at end,
-      voided_by = case when p_payload ? 'voided_by' then (p_payload ->> 'voided_by')::uuid else t.voided_by end
-    where t.id = v_id;
-    if not found then
-      insert into public.sale_items (id, sale_id, product_id, sku_snapshot, name_snapshot, unit_price_snapshot,
-        quantity, line_discount, line_total, voided_at, voided_by)
-      values (
-        v_id, (p_payload ->> 'sale_id')::uuid, (p_payload ->> 'product_id')::uuid, p_payload ->> 'sku_snapshot',
-        p_payload ->> 'name_snapshot', (p_payload ->> 'unit_price_snapshot')::numeric, (p_payload ->> 'quantity')::numeric,
-        coalesce((p_payload ->> 'line_discount')::numeric, 0), (p_payload ->> 'line_total')::numeric,
-        (p_payload ->> 'voided_at')::timestamptz, (p_payload ->> 'voided_by')::uuid);
-    end if;
+  when 'sale_item', 'stock_movement' then
+    -- Sale lines and stock movements only ever arrive inside their sale,
+    -- checked together. On their own they could rewrite a sale after the fact.
+    raise exception 'A % only arrives as part of its sale.', p_type;
 
   when 'activity_log' then
     -- The device isn't a trustworthy source for its own address, so it's
@@ -869,6 +949,11 @@ begin
     on conflict (id) do nothing;
 
   when 'audit_log' then
+    -- A terminal only reports what it checks itself; everything else on the
+    -- audit log is written by the server.
+    if p_payload ->> 'action_type' is null or p_payload ->> 'action_type' not in ('shift_close_discrepancy', 'failed_pin_attempt') then
+      raise exception 'A terminal can''t record a "%" audit event.', p_payload ->> 'action_type';
+    end if;
     insert into public.audit_logs (id, terminal_id, actor_id, approver_id, action_type, entity_type, entity_id, details, client_created_at)
     values (
       v_id, coalesce(p_payload ->> 'terminal_id', 'unknown'), (p_payload ->> 'actor_id')::uuid, (p_payload ->> 'approver_id')::uuid,
@@ -877,6 +962,12 @@ begin
     on conflict (id) do nothing;
 
   when 'credit_payment' then
+    if coalesce((p_payload ->> 'amount')::numeric, 0) <= 0 then
+      raise exception 'A payment needs an amount above zero.';
+    end if;
+    if p_payload ->> 'payment_method' is null or p_payload ->> 'payment_method' not in ('cash', 'gcash', 'bank') then
+      raise exception 'A payment is cash, GCash or bank transfer.';
+    end if;
     insert into public.credit_payments (id, customer_id, amount, payment_method, reference, note, terminal_id, shift_id, received_by, client_created_at)
     values (
       v_id, (p_payload ->> 'customer_id')::uuid, (p_payload ->> 'amount')::numeric, p_payload ->> 'payment_method',
@@ -885,26 +976,18 @@ begin
     on conflict (id) do nothing;
 
   when 'material_request' then
-    v_status := coalesce(p_payload ->> 'status', 'pending');
+    -- A new list is waiting to be picked; only the server marks it picked
+    -- up. One arriving after its sale was voided has nothing to hand over.
+    v_status := 'pending';
     v_sale_id := pos.uuid_or_null(p_payload ->> 'sale_id');
-    -- A sale's pick list arriving after the sale was voided: nothing to hand over.
     if v_sale_id is not null and exists (select 1 from public.sales s where s.id = v_sale_id and s.status = 'voided') then
       v_status := 'cancelled';
     end if;
-    insert into public.material_requests (id, terminal_id, sale_id, requested_by, items, status, notes, fulfilled_by, fulfilled_at, client_created_at)
+    insert into public.material_requests (id, terminal_id, sale_id, requested_by, items, status, notes, client_created_at)
     values (
       v_id, p_payload ->> 'terminal_id', v_sale_id, (p_payload ->> 'requested_by')::uuid,
       coalesce(nullif(p_payload -> 'items', 'null'::jsonb), '[]'::jsonb), v_status, p_payload ->> 'notes',
-      (p_payload ->> 'fulfilled_by')::uuid, (p_payload ->> 'fulfilled_at')::timestamptz,
       (p_payload ->> 'client_created_at')::timestamptz)
-    on conflict (id) do nothing;
-
-  when 'stock_movement' then
-    insert into public.stock_movements (id, product_id, batch_id, terminal_id, delta, reason, reference_id, actor_id, note, client_created_at)
-    values (
-      v_id, (p_payload ->> 'product_id')::uuid, (p_payload ->> 'batch_id')::uuid, p_payload ->> 'terminal_id',
-      (p_payload ->> 'delta')::numeric, p_payload ->> 'reason', (p_payload ->> 'reference_id')::uuid,
-      (p_payload ->> 'actor_id')::uuid, p_payload ->> 'note', (p_payload ->> 'client_created_at')::timestamptz)
     on conflict (id) do nothing;
 
   else
@@ -917,6 +1000,7 @@ end $$;
 --
 --   select pos.add_staff('Maria Santos', 'owner', '123456');
 --   select pos.add_terminal('Front counter');
+--   select pos.anonymize_customer('<customer id>');
 -- ===========================================================================
 
 create or replace function pos.add_staff(p_full_name text, p_role text, p_pin text) returns uuid
@@ -938,6 +1022,27 @@ begin
   values (btrim(p_full_name), p_role, pos.hash_pin(p_pin))
   returning id into v_id;
   return v_id;
+end $$;
+
+-- Removes a customer's name and phone number on their request (Data Privacy
+-- Act). Their sales and payments stay, as the store's financial records,
+-- under "Removed customer". Refused while they still owe money.
+--   select pos.anonymize_customer('<the customer''s id, from Table Editor > customers>');
+create or replace function pos.anonymize_customer(p_customer uuid) returns text
+language plpgsql set search_path = '' as $$
+declare
+  v_owed numeric := pos.customer_owed(p_customer);
+begin
+  if not exists (select 1 from public.customers c where c.id = p_customer) then
+    raise exception 'No customer has that id.';
+  end if;
+  if v_owed > 0.004 then
+    raise exception 'This customer still owes %. Record their payment first.', v_owed;
+  end if;
+  update public.customers set name = 'Removed customer', phone = null, is_active = false where id = p_customer;
+  insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
+  values ('sql-editor', 'customer_anonymized', 'customer', p_customer, '{}'::jsonb, now());
+  return 'The customer''s name and phone number were removed.';
 end $$;
 
 -- Registers a device and returns its key. The key is shown this once and
@@ -1045,11 +1150,15 @@ begin
     perform pos.fail(422, 'That password isn''t right — try again.');
   end if;
 
-  v_problem := pos.check_pin(v_user.id, v_pin);
+  v_problem := pos.check_pin(v_user.id, v_pin, auth);
   if v_problem is not null then
     perform set_config('response.status', '422', true);
     return jsonb_build_object('message', v_problem);
   end if;
+
+  -- Sign-ins that ran out (see pos.require_user) are cleared as new ones are made.
+  delete from public.api_tokens t
+  where t.created_at < now() - interval '12 hours' or t.last_used_at < now() - interval '2 hours';
 
   v_token := encode(extensions.gen_random_bytes(32), 'hex');
   insert into public.api_tokens (user_id, terminal_id, token_hash)
@@ -1118,16 +1227,18 @@ begin
       'low_stock_count', (select count(*) from public.products p
                           where p.is_active
                             and coalesce((select sum(b.qty_good_remaining) from public.stock_batches b
-                                          where b.product_id = p.id and b.qty_good_remaining > 0), 0) <= p.reorder_level)),
+                                          where b.product_id = p.id), 0) <= p.reorder_level)),
     'on_shift', (select coalesce(jsonb_agg(jsonb_build_object('name', u.full_name, 'started_at', sh.started_at) order by sh.started_at desc), '[]'::jsonb)
                  from public.shift_logs sh left join public.users u on u.id = sh.cashier_id
                  where sh.status = 'open'),
-    'top_selling', (select coalesce(jsonb_agg(to_jsonb(t) order by t.units_sold desc), '[]'::jsonb) from (
+    -- Voided sales don't count as sold.
+    'top_selling', (select coalesce(jsonb_agg(to_jsonb(t) order by t.units_sold desc, t.name), '[]'::jsonb) from (
                       select p.id, p.name, p.unit, sum(abs(m.delta)) as units_sold
                       from public.stock_movements m join public.products p on p.id = m.product_id
                       where m.reason = 'sale' and m.client_created_at >= v_start and m.client_created_at < v_end
+                        and not exists (select 1 from public.sales s where s.id = m.reference_id and s.status = 'voided')
                       group by p.id, p.name, p.unit
-                      order by units_sold desc
+                      order by units_sold desc, p.name
                       limit 5) t),
     -- In stock but unsold for 30 days, most money tied up first.
     'not_selling', (select coalesce(jsonb_agg(to_jsonb(t) order by t.value desc), '[]'::jsonb) from (
@@ -1137,7 +1248,8 @@ begin
                       where p.is_active
                         and not exists (select 1 from public.stock_movements m
                                         where m.product_id = p.id and m.reason = 'sale'
-                                          and m.client_created_at >= now() - interval '30 days')
+                                          and m.client_created_at >= now() - interval '30 days'
+                                          and not exists (select 1 from public.sales s where s.id = m.reference_id and s.status = 'voided'))
                       group by p.id, p.name, p.unit, p.unit_price
                       having sum(b.qty_good_remaining) > 0
                       order by sum(b.qty_good_remaining) * p.unit_price desc
@@ -1149,7 +1261,9 @@ end $$;
 -- ---------------------------------------------------------------------------
 
 -- args: { include_archived }. Each item's good stock in the store and the
--- warehouse, plus damaged units.
+-- warehouse, plus damaged units. A batch two offline tills both sold from
+-- goes below zero; it counts too, so the screen shows what's really on hand
+-- (and what a count correction is measured against).
 create or replace function public.pos_stock(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -1170,7 +1284,7 @@ begin
              coalesce(sum(b.qty_good_remaining) filter (where b.location = 'warehouse'), 0) as warehouse_good,
              coalesce(sum(b.qty_damaged), 0) as damaged
       from public.products p
-      left join public.stock_batches b on b.product_id = p.id and (b.qty_good_remaining > 0 or b.qty_damaged > 0)
+      left join public.stock_batches b on b.product_id = p.id and (b.qty_good_remaining <> 0 or b.qty_damaged > 0)
       where v_archived or p.is_active
       group by p.id) r);
 end $$;
@@ -1744,14 +1858,18 @@ begin
     perform pos.fail(422, 'Choose an owner.');
   end if;
 
-  v_problem := pos.check_pin(v_owner.id, coalesce(args ->> 'pin', ''));
+  v_problem := pos.check_pin(v_owner.id, coalesce(args ->> 'pin', ''), auth);
   if v_problem is not null then
     perform set_config('response.status', '422', true);
     return jsonb_build_object('message', v_problem);
   end if;
 
   if v_owner.totp_enabled and not pos.totp_verify(v_owner.totp_secret, args ->> 'code') then
-    perform pos.fail(422, 'That authenticator code is wrong or has expired.');
+    insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
+    values (coalesce(nullif(auth ->> 'terminal_id', ''), 'unknown'), 'failed_pin_attempt', 'user', v_owner.id,
+            jsonb_build_object('step', 'code', 'checked', 'server'), now());
+    perform set_config('response.status', '422', true);
+    return jsonb_build_object('message', 'That authenticator code is wrong or has expired.');
   end if;
 
   return pos.approve_void_as(auth, pos.arg_uuid(args, 'id', 'Void request'), v_owner);
@@ -2039,6 +2157,51 @@ begin
     jsonb_build_object('staff_name', v_user.full_name));
 
   return jsonb_build_object('enabled', false);
+end $$;
+
+-- ---------------------------------------------------------------------------
+-- Audit log (owners): events that need an owner's eyes. Wrong passwords at
+-- sign-in, cash differences, voids, oversold stock, returns, clock problems.
+-- ---------------------------------------------------------------------------
+
+-- args: { action_type?, from?, to?, page? }. Newest first, with who did it,
+-- who approved it, and what it was about.
+create or replace function public.pos_audit_log(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
+declare
+  v_type text := nullif(args ->> 'action_type', '');
+  v_from timestamptz;
+  v_to timestamptz;
+  v_page integer;
+  v_total bigint;
+  v_rows jsonb;
+begin
+  perform pos.require_owner(auth);
+  v_from := pos.arg_time(args, 'from', 'From');
+  v_to := pos.arg_time(args, 'to', 'To');
+  v_page := greatest(1, coalesce(pos.arg_number(args, 'page', 'page')::integer, 1));
+
+  with found as (
+    select a from public.audit_logs a
+    where (v_type is null or a.action_type = v_type)
+      and (v_from is null or a.client_created_at >= v_from)
+      and (v_to is null or a.client_created_at <= v_to)
+  ), page as (
+    select f.a from found f
+    order by (f.a).client_created_at desc
+    limit 200 offset (v_page - 1) * 200
+  )
+  select
+    (select count(*) from found),
+    (select jsonb_agg(to_jsonb(x.a) || jsonb_build_object(
+              'actor', pos.user_brief((x.a).actor_id),
+              'approver', pos.user_brief((x.a).approver_id),
+              'subject', pos.audit_subject((x.a).entity_type, (x.a).entity_id))
+            order by (x.a).client_created_at desc)
+     from page x)
+  into v_total, v_rows;
+
+  return pos.page_json(v_rows, v_total, v_page, 200);
 end $$;
 
 -- ===========================================================================

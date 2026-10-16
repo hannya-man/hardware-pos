@@ -57,12 +57,17 @@ export function connectToServer(typed = password) {
 // Runs a server call that needs the person's server login. If that login is
 // missing, it's made with the sign-in password; the password is only asked
 // for when that isn't possible (e.g. the app was reopened after a refresh).
+// A screen still loading when its person signed out (or the till locked)
+// never asks the next person for that password.
 export async function withServerAuth(fn) {
+  const user = session.user;
   try {
     return await fn();
   } catch (err) {
     if (err.name !== 'AuthRequiredError' || err.kind !== 'user') throw err;
+    if (!user || session.user !== user) throw err;
     if (await connectToServer()) return fn();
+    if (session.user !== user) throw err;
 
     const typed = await showPrompt('Enter your password', {
       message: 'To open this screen, enter the password you sign in with.',

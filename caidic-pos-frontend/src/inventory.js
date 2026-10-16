@@ -350,7 +350,7 @@ function itemEditor(containerId, fields) {
   return {
     get items() { return items; },
     add(p, defaults) {
-      if (!items.some((i) => i.product_id === p.id)) items.push({ product_id: p.id, sku_snapshot: p.sku, name_snapshot: p.name, ...defaults });
+      if (!items.some((i) => i.product_id === p.id)) items.push({ product_id: p.id, sku_snapshot: p.sku, name_snapshot: p.name, unit_snapshot: p.unit, ...defaults });
       draw();
     },
     clear() { items = []; draw(); },

@@ -41,6 +41,11 @@ export function clearCart() {
   drawCart();
 }
 
+// Closes checkout without asking (the till locking itself). Nothing is charged.
+export function cancelCheckout() {
+  if (checkoutTotal !== null) closeCheckout();
+}
+
 // ---------------------------------------------------------------------------
 // Item grid and search
 // ---------------------------------------------------------------------------
@@ -188,7 +193,7 @@ $('sendToPickListBtn').addEventListener('click', async () => {
     await submitMaterialRequest({
       requested_by: session.user.id,
       shift_id: session.shiftId,
-      items: cart.map((l) => ({ product_id: l.product_id, sku_snapshot: l.sku_snapshot, name_snapshot: l.name_snapshot, quantity_requested: l.quantity })),
+      items: cart.map((l) => ({ product_id: l.product_id, sku_snapshot: l.sku_snapshot, name_snapshot: l.name_snapshot, unit_snapshot: l.unit_snapshot, quantity_requested: l.quantity })),
       notes: note.trim() || null,
     });
     clearCart();
