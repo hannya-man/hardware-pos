@@ -46,16 +46,19 @@ export const setActiveShift = (id) => { activeShiftId = id; };
 
 // Calls one server function with { auth, args }. The terminal id and the
 // shift go with every call, so actions taken there land in the right shift.
-// mode 'terminal': device credential (catalog pull, outbox push, sign-in).
+// mode 'terminal': device credential (catalog pull, outbox push, sign-in);
+// terminalKey tries a key other than the saved one.
 // mode 'user': per-person token for screens that read the server.
-async function rpc(fn, args = {}, { mode = 'user' } = {}) {
+// A failure says why: err.offline when the server couldn't be reached (or
+// is down), else err.status and the server's answer in err.body.
+async function rpc(fn, args = {}, { mode = 'user', terminalKey = null } = {}) {
   if (!serverConfigured) {
     throw new Error('This copy of the app was built without its server address (VITE_SUPABASE_URL and VITE_SUPABASE_PUBLISHABLE_KEY).');
   }
 
   const auth = { terminal_id: await getTerminalId(), shift_id: activeShiftId };
   if (mode === 'terminal') {
-    auth.terminal_key = await getTerminalKey();
+    auth.terminal_key = terminalKey ?? await getTerminalKey();
     if (!auth.terminal_key) throw new AuthRequiredError('terminal');
   } else if (mode === 'user') {
     auth.token = await getAuthToken();
@@ -68,7 +71,7 @@ async function rpc(fn, args = {}, { mode = 'user' } = {}) {
       method: 'POST', headers: HEADERS, body: JSON.stringify({ auth, args }), signal: AbortSignal.timeout(15_000),
     });
   } catch (err) {
-    throw new Error(`Could not reach the server (${err.message}). Check the internet connection.`);
+    throw Object.assign(new Error(`Could not reach the server (${err.message}). Check the internet connection.`), { offline: true });
   }
 
   const text = await res.text();
@@ -93,14 +96,31 @@ async function rpc(fn, args = {}, { mode = 'user' } = {}) {
   }
   // A refusal with a reason (wrong password, request expired, ...) is shown
   // as just that reason; anything else keeps the technical details.
-  if (res.status < 500 && message) throw new Error(message);
-  throw new Error(`${fn} failed: ${res.status}${message ? `: ${message}` : ''}`);
+  if (res.status < 500 && message) throw Object.assign(new Error(message), { status: res.status, body });
+  throw Object.assign(new Error(`${fn} failed: ${res.status}${message ? `: ${message}` : ''}`), { status: res.status, body, offline: res.status >= 500 });
 }
 
-// Swaps a person's password for a server token (the caller decides whether to keep it).
-export async function requestToken(user_id, password) {
-  const { token } = await rpc('pos_login', { user_id, pin: password }, { mode: 'terminal' });
-  return token;
+// Whether the server takes this terminal key: 'ok', 'rejected', or
+// 'unknown' (no connection to ask). Checked before a typed key is saved.
+export async function checkTerminalKey(key) {
+  try {
+    await rpc('pos_catalog', { since: '2999-01-01T00:00:00Z' }, { mode: 'terminal', terminalKey: key });
+    return 'ok';
+  } catch (err) {
+    return err instanceof AuthRequiredError ? 'rejected' : 'unknown';
+  }
+}
+
+// Swaps a person's password, and an owner's authenticator code when they use
+// two-factor login, for a server token (the caller decides whether to keep
+// it). The server checks the code: the till never has the secret. A refusal
+// with err.body.code_required means the password was right and only the
+// code is missing; two_factor_checked on success says the code was checked.
+export const requestLogin = (user_id, password, code = null) =>
+  rpc('pos_login', { user_id, pin: password, ...(code ? { code } : {}) }, { mode: 'terminal' });
+
+export async function requestToken(user_id, password, code = null) {
+  return (await requestLogin(user_id, password, code)).token;
 }
 
 export const saveServerLogin = (token) => setAuthToken(token);
@@ -568,6 +588,9 @@ export function startSyncWorker({ onStatusChange, onNeedsProvisioning, onUnsynce
   onUnsynced = reportTo ?? null;
   reportUnsynced();
 
+  // A key the server stopped taking shows up here too, with nothing waiting to be sent.
+  const pull = () => pullCatalog().then((ok) => { if (ok === false) onNeedsProvisioning?.(); }, () => {});
+
   const recheck = async () => {
     const now = await isServerReachable();
     if (now === online) return;
@@ -575,7 +598,7 @@ export function startSyncWorker({ onStatusChange, onNeedsProvisioning, onUnsynce
     onStatusChange?.(online);
     if (online) {
       await flushOutbox({ onNeedsProvisioning });
-      await pullCatalog().catch(() => {});
+      await pull();
     }
   };
 
@@ -585,5 +608,5 @@ export function startSyncWorker({ onStatusChange, onNeedsProvisioning, onUnsynce
   recheck();
 
   setInterval(() => flushOutbox({ onNeedsProvisioning }), 15_000);
-  setInterval(() => pullCatalog().catch(() => {}), 60_000);
+  setInterval(pull, 60_000);
 }

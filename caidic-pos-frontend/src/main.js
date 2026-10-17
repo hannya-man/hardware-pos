@@ -1,11 +1,11 @@
 // main.js — startup, sign-in (clock in), the menu, sign-out (break or end of
 // shift), and Sync now.
 
-import { db, isProvisioned, setTerminalKey, getTerminalId, getOpenShift, lastCountedCash, getSyncMeta, setSyncMeta } from './local-db.js';
+import { db, isProvisioned, setTerminalKey, getTerminalKey, getTerminalId, getOpenShift, lastCountedCash, getSyncMeta, setSyncMeta } from './local-db.js';
 import { verifyStaffLogin } from './input-handler.js';
 import {
   startSyncWorker, pullCatalog, forceFullSync, flushOutbox, retryFailedOutbox, openShift, closeShift, shiftCash,
-  forgetServerLogin, recordFailedSignIn, serverConfigured,
+  forgetServerLogin, recordFailedSignIn, serverConfigured, checkTerminalKey, requestLogin, saveServerLogin,
 } from './sync-worker.js';
 import { verifyTotp } from './totp.js';
 import { session, setSession, log, connectToServer } from './session.js';
@@ -87,16 +87,8 @@ async function boot() {
 
   if (!serverConfigured) toast("This copy of the app wasn't built with its server address, so it can't sync.", 'error');
 
-  if (!(await isProvisioned())) {
-    const key = await showPrompt('Set up this terminal', {
-      message: "This device hasn't been set up yet. Enter its one-time terminal key.",
-      placeholder: 'Terminal key',
-      confirmLabel: 'Save',
-    });
-    if (key?.trim()) await setTerminalKey(key.trim());
-  }
+  if (!(await isProvisioned())) await askForTerminalKey();
 
-  let warnedKey = false;
   let online = null;
   let unsynced = 0;
   const drawStatus = () => {
@@ -114,11 +106,7 @@ async function boot() {
       unsynced = count;
       drawStatus();
     },
-    onNeedsProvisioning: () => {
-      if (warnedKey) return;
-      warnedKey = true;
-      toast("This terminal's key is missing or was rejected. Sync is paused until it is set up again.", 'error');
-    },
+    onNeedsProvisioning: () => askForTerminalKey({ fromSync: true }),
   });
 
   await pullCatalog().catch(() => {});
@@ -138,8 +126,56 @@ async function boot() {
 }
 
 // ---------------------------------------------------------------------------
-// Sign-in. Fully offline: checked against this device's synced PIN hashes.
-// Owners use 6 digits (plus an authenticator code if two-factor is on).
+// The terminal key: asked for when the device is set up, and again whenever
+// the server stops taking it (an owner replaced a key that leaked, say).
+// Sales and everything else made meanwhile stay on the device and go up as
+// soon as the new key is in. A key is checked with the server before it's
+// saved, unless there's no internet to ask.
+// ---------------------------------------------------------------------------
+
+const KEY_ASK_AGAIN_MS = 10 * 60_000;
+let keyPrompt = null;
+let keyAskedAt = 0;
+
+function askForTerminalKey({ fromSync = false } = {}) {
+  if (keyPrompt) return keyPrompt;
+  // Sync notices every 15 seconds: ask then at most every 10 minutes, and
+  // never on top of a checkout or another dialog (the next notice asks).
+  if (fromSync && (Date.now() - keyAskedAt < KEY_ASK_AGAIN_MS || document.querySelector('.overlay:not([hidden])'))) {
+    return Promise.resolve(false);
+  }
+  keyPrompt = (async () => {
+    const replacing = !!(await getTerminalKey());
+    const key = await showPrompt(replacing ? "Enter this till's new key" : 'Set up this terminal', {
+      message: replacing
+        ? "The server doesn't accept this till's key any more, so sales are kept here and not sent yet. Enter the new key from an owner (made in Supabase with pos.add_terminal). Nothing made on this till is lost."
+        : "This device hasn't been set up yet. Enter its one-time terminal key.",
+      placeholder: 'Terminal key',
+      confirmLabel: 'Save',
+      cancelLabel: fromSync ? 'Later' : 'Cancel',
+      onConfirm: async (value) => ((await checkTerminalKey(value.trim())) === 'rejected'
+        ? "The server doesn't accept that key. Check it with an owner and try again." : null),
+    });
+    keyAskedAt = Date.now();
+    if (!key?.trim()) {
+      if (fromSync) toast('Sales stay on this till until it has a working key. It will ask again in 10 minutes.', 'error');
+      return false;
+    }
+    await setTerminalKey(key.trim());
+    if (replacing) {
+      toast('Key saved. Anything waiting on this till is being sent now.');
+      flushOutbox().catch(() => {});
+      pullCatalog().catch(() => {});
+    }
+    return true;
+  })().finally(() => { keyPrompt = null; });
+  return keyPrompt;
+}
+
+// ---------------------------------------------------------------------------
+// Sign-in. The password is checked offline against this device's synced PIN
+// hashes. Owners use 6 digits, plus an authenticator code if two-factor is
+// on, which only the server can check (it alone has the secret).
 // ---------------------------------------------------------------------------
 
 async function renderStaffGrid() {
@@ -223,9 +259,6 @@ async function checkPin() {
   typedPassword = pin; // before a two-factor step reuses the keypad
 
   if (user.role === 'owner' && user.totp_enabled) {
-    if (!user.totp_secret) {
-      return loginFailed('Two-factor login has not synced to this device yet. Connect to the internet and try again.');
-    }
     stage = 'totp';
     pin = '';
     $('pinPrompt').textContent = 'Enter the 6-digit code from your authenticator app';
@@ -236,10 +269,27 @@ async function checkPin() {
   await signIn(user);
 }
 
+// The server checks the code (wrong ones count toward its lock and go on the
+// Audit log), and the same call connects this person to it. With no internet
+// they can still sign in to sell; owner screens ask for a code once it's back.
 async function checkTotp() {
-  if (await verifyTotp(selectedUser.totp_secret, pin)) return signIn(selectedUser);
-  recordFailedSignIn({ user_id: selectedUser.id, step: 'code' }).catch(() => {});
-  loginFailed('That code did not match. Try again.');
+  const code = pin;
+  try {
+    const login = await requestLogin(selectedUser.id, typedPassword, code);
+    // A server not yet updated doesn't check codes: this device does, as it
+    // used to, while it still has the secret.
+    if (!login.two_factor_checked && !(selectedUser.totp_secret && await verifyTotp(selectedUser.totp_secret, code))) {
+      recordFailedSignIn({ user_id: selectedUser.id, step: 'code' }).catch(() => {});
+      return loginFailed('That code did not match. Try again.');
+    }
+    return signIn(selectedUser, login.token);
+  } catch (err) {
+    if (err.offline) {
+      toast('No internet: your authenticator code will be checked when you open an owner screen.');
+      return signIn(selectedUser);
+    }
+    return loginFailed(err.message); // a wrong code, or too many tries
+  }
 }
 
 function loginFailed(message) {
@@ -251,14 +301,16 @@ function loginFailed(message) {
   $('pinDots').classList.add('shake');
 }
 
-async function signIn(user) {
+// token: a server sign-in already made with the password and code.
+async function signIn(user, token = null) {
   const password = typedPassword;
   typedPassword = null;
   await forgetServerLogin(); // never act on the server as the previous person
+  if (token) await saveServerLogin(token);
   await setSyncMeta('current_user_id', user.id);
   await setSyncMeta('last_active_at', Date.now());
   closePinPad();
-  await enterApp(user, 'login', password);
+  await enterApp(user, 'login', password, { connected: !!token });
 }
 
 $('keypad').addEventListener('click', (e) => {
@@ -280,7 +332,7 @@ document.addEventListener('keydown', (e) => {
 // starts a new one with the cash that's in the drawer.
 // ---------------------------------------------------------------------------
 
-async function enterApp(user, logEvent, password = null) {
+async function enterApp(user, logEvent, password = null, { connected = false } = {}) {
   $('loginScreen').hidden = true;
   $('appShell').hidden = false;
   $('sideName').textContent = user.full_name;
@@ -305,12 +357,12 @@ async function enterApp(user, logEvent, password = null) {
 
   setSession(user, shift.id, password);
   // Ready for screens that read the server, so there's no second password prompt.
-  const connected = password ? connectToServer() : Promise.resolve();
+  const ready = connected ? Promise.resolve(true) : password ? connectToServer() : Promise.resolve();
   if (resumed) log(logEvent); // a new shift already logs its own clock-in
   $('sideShift').textContent = `On shift since ${since(shift.started_at)}`;
   renderNav();
   showView(user.role === 'cashier' ? 'billing' : 'dashboard');
-  connected.then(startVoidAlerts); // owners: voids waiting for their yes
+  ready.then(startVoidAlerts); // owners: voids waiting for their yes
 }
 
 function renderNav() {
@@ -484,8 +536,9 @@ async function syncNow() {
     if (await forceFullSync()) {
       const [items, staff] = await Promise.all([db.products.count(), db.users.count()]);
       toast(`Synced. This device has ${items} items and ${staff} staff accounts.`);
-    } else {
-      toast('Could not reach the server. Check the internet connection and that this terminal has been set up.', 'error');
+    } else if (await askForTerminalKey()) { // the server didn't take this till's key
+      await forceFullSync();
+      toast('Synced with the new key.');
     }
 
     if (session.user) await SCREENS.find((s) => s.key === activeView)?.render();

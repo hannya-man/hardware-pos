@@ -369,7 +369,11 @@ input.input::-webkit-search-cancel-button {
 .option span { font-size: 13px; color: var(--text-2); }
 
 .setting-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 12px; border: 1px solid var(--line); border-radius: var(--radius-sm); }
-.inline-form { display: grid; grid-template-columns: 2fr 1fr 1fr auto; gap: 12px; align-items: end; }
+.inline-form { display: grid; grid-template-columns: 2fr 1fr auto; gap: 12px; align-items: end; }
+/* A short explanation inside a card or dialog; note-warn for something to check */
+.note { margin: 0 0 16px; padding: 10px 12px; border-radius: var(--radius-sm); background: var(--surface-3); color: var(--text-2); font-size: 13.5px; line-height: 1.5; }
+.note-warn { margin: 14px 0 0; background: var(--warn-soft); color: var(--warn); }
+.input:disabled { background: var(--surface-2); color: var(--text-3); cursor: not-allowed; }
 .inline-form .field { margin-bottom: 0; }
 .inline-form + .form-status { margin-top: 10px; }
 .inline-form + .form-status:empty { display: none; }

@@ -27,9 +27,12 @@ server functions (Supabase), and the devices.
 
 | Request | Who | How |
 |---|---|---|
-| New staff account | Owner | **Staff → Add staff** |
-| Reset someone's password | Owner | **Staff → Edit** |
-| Two-factor login for an owner | Owner | **Staff → Edit → Set up** |
+| New cashier account | Owner | **Staff → Add a cashier** |
+| New owner account | Owner with Supabase access | SQL Editor: `select pos.add_staff('Name', 'owner', '123456');` ([DEPLOY.md](../../DEPLOY.md#owner-accounts)) |
+| Reset a cashier's password | Owner | **Staff → Edit** |
+| Reset an owner's password, or turn off their two-factor login (lost phone) | Owner with Supabase access | SQL Editor: `pos.reset_password`, `pos.turn_off_two_factor` ([DEPLOY.md](../../DEPLOY.md#owner-accounts)) |
+| Two-factor login for an owner | That owner | **Staff → Edit** on their own account **→ Set up** |
+| Replace a device's key (seen by someone it shouldn't have been) | Owner | SQL Editor: `pos.add_terminal`, then retire the old key; the device asks for the new one |
 | Remove someone's access | Owner | **Staff → Deactivate** (signs them out everywhere at once) |
 | Set up a new device | Owner | SQL Editor: `select pos.add_terminal('Device name');`, then enter the key on the device |
 | Retire a device | Owner | **Table Editor → terminals →** set `is_active` to `false` |
@@ -110,7 +113,7 @@ pages. Keep dated copies, with their terms, and review them every year
 - **Requirements:** the store's rules (roles, two-owner voids, blind cash
   counts, offline selling) are written in this folder, in the code's
   comments, and as tests.
-- **Verification:** 380+ automated checks in `tests/` run on every change:
+- **Verification:** 440+ automated checks in `tests/` run on every change:
   the server functions on a real PostgreSQL database, the app's sync code
   through a full store day, the offline cache, and the screens themselves,
   used in a simulated browser (selling, credit, pick lists, voids, the

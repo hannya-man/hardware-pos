@@ -25,29 +25,34 @@ export function log(event_type, extra = {}) {
 
 export const isOwner = () => session.user?.role === 'owner';
 
-// Signs this person in to the server with the password they already typed.
+// Signs this person in to the server with the password they already typed,
+// plus a code from their authenticator app for an owner with two-factor
+// login (codes last seconds, so one is asked for whenever it's needed).
 // Quietly does nothing when offline; screens retry it when they need it. A
 // screen that needs the server while this is still on its way (the first
 // screen after sign-in) waits for it rather than making a second login.
 let connecting = null; // { userId, attempt } for the sign-in password
+let lastProblem = null; // why the last attempt failed: { message, codeNeeded, offline }
 
-export function connectToServer(typed = password) {
+export function connectToServer(typed = password, code = null) {
   const user = session.user;
   if (!user || !typed) return Promise.resolve(false);
-  if (typed === password && connecting?.userId === user.id) return connecting.attempt;
+  if (typed === password && !code && connecting?.userId === user.id) return connecting.attempt;
 
   const attempt = (async () => {
     try {
-      const token = await requestToken(user.id, typed);
+      const token = await requestToken(user.id, typed, code);
       if (session.user?.id !== user.id) return false; // they signed out meanwhile
       await saveServerLogin(token);
       password = typed;
+      lastProblem = null;
       return true;
-    } catch {
+    } catch (err) {
+      lastProblem = { message: err.offline ? 'No internet right now.' : err.message, codeNeeded: !!err.body?.code_required, offline: !!err.offline };
       return false;
     }
   })();
-  if (typed === password) {
+  if (typed === password && !code) {
     connecting = { userId: user.id, attempt };
     attempt.finally(() => { if (connecting?.attempt === attempt) connecting = null; });
   }
@@ -56,9 +61,10 @@ export function connectToServer(typed = password) {
 
 // Runs a server call that needs the person's server login. If that login is
 // missing, it's made with the sign-in password; the password is only asked
-// for when that isn't possible (e.g. the app was reopened after a refresh).
-// A screen still loading when its person signed out (or the till locked)
-// never asks the next person for that password.
+// for when that isn't possible (e.g. the app was reopened after a refresh),
+// and an owner's authenticator code when their account uses one. A screen
+// still loading when its person signed out (or the till locked) never asks
+// the next person for that password.
 export async function withServerAuth(fn) {
   const user = session.user;
   try {
@@ -69,15 +75,31 @@ export async function withServerAuth(fn) {
     if (await connectToServer()) return fn();
     if (session.user !== user) throw err;
 
-    const typed = await showPrompt('Enter your password', {
-      message: 'To open this screen, enter the password you sign in with.',
-      type: 'password',
-      inputmode: 'numeric',
-      confirmLabel: 'Continue',
-      onConfirm: async (value) => ((await connectToServer(value)) ? null : "That didn't work. Wrong password, or no internet right now."),
-    });
+    // The password, unless the one from sign-in was right and only the code is missing.
+    let typed = password;
+    if (!(typed && lastProblem?.codeNeeded)) {
+      typed = await showPrompt('Enter your password', {
+        message: 'To open this screen, enter the password you sign in with.',
+        type: 'password',
+        inputmode: 'numeric',
+        confirmLabel: 'Continue',
+        onConfirm: async (value) => {
+          if (await connectToServer(value) || lastProblem?.codeNeeded) return null; // a right password: the code comes next
+          return `That didn't work. ${lastProblem?.message ?? 'Wrong password, or no internet right now.'}`;
+        },
+      });
+      if (typed === null) throw new Error('Password entry cancelled');
+      if (!lastProblem?.codeNeeded) return fn();
+    }
 
-    if (typed === null) throw new Error('Password entry cancelled');
+    const code = await showPrompt('Enter your authenticator code', {
+      message: 'Two-factor login is on for your account: enter the 6-digit code from your authenticator app.',
+      inputmode: 'numeric',
+      placeholder: '123456',
+      confirmLabel: 'Continue',
+      onConfirm: async (value) => ((await connectToServer(typed, value.replace(/\D/g, ''))) ? null : lastProblem?.message ?? "That didn't work."),
+    });
+    if (code === null) throw new Error('Code entry cancelled');
     return fn();
   }
 }

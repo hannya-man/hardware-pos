@@ -8,10 +8,10 @@ import {
   flushOutbox, fetchSales, fetchShifts, fetchShift, submitReturn,
   fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor, fetchAuditLog,
 } from './sync-worker.js';
-import { withServerAuth } from './session.js';
+import { session, withServerAuth } from './session.js';
 import { askToVoid, openVoidRequest } from './voids.js';
 import {
-  $, esc, peso, qty, fmtTime, fmtDate, fmtDateTime, humanize, badge, avatar, setStatus, showSelected, countTo,
+  $, esc, peso, qty, round2, fmtTime, fmtDate, fmtDateTime, humanize, badge, avatar, setStatus, showSelected, countTo,
   tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast,
 } from './ui.js';
 
@@ -303,8 +303,28 @@ async function openShiftDetail(id) {
       : stat('Cash difference', diff == null ? '—' : diff === 0 ? 'None' : signed(diff),
         shift.counted_cash == null ? 'no cash to count' : `counted ${peso(shift.counted_cash)} of ${peso(shift.expected_cash)}`, diff ? 'text-bad' : 'text-ok'),
   ].join('');
+
+  // The till works out what the drawer should hold; the records on the
+  // server should say the same.
+  const byRecords = drawerByRecords(shift, shiftSales, payments);
+  const mismatch = shift.status === 'closed' && shift.expected_cash != null && Math.abs(byRecords - Number(shift.expected_cash)) > 0.009;
+  $('shiftCashCheck').hidden = !mismatch;
+  $('shiftCashCheck').textContent = mismatch
+    ? `The till worked out ${peso(shift.expected_cash)} should be in the drawer, but this shift's sales and payments on the server add up to ${peso(byRecords)}. A sale that hasn't synced from that till yet would explain it; if not, check the till.`
+    : '';
   drawTimeline();
   $('content').scrollTop = 0;
+}
+
+// What the drawer should hold by the server's own records: the opening cash,
+// cash sales, down payments on credit sales, and cash credit payments. A sale
+// voided after the shift ended still counts, as it did when the till closed.
+function drawerByRecords(shift, shiftSales, payments) {
+  const counted = shiftSales.filter((s) => s.status === 'completed'
+    || (s.status === 'voided' && shift.ended_at && s.updated_at > shift.ended_at));
+  return round2(Number(shift.opening_cash ?? 0)
+    + counted.reduce((t, s) => t + (s.payment_method === 'cash' ? Number(s.total_amount) : s.payment_method === 'credit' ? Number(s.amount_paid ?? 0) : 0), 0)
+    + payments.reduce((t, p) => t + (p.payment_method === 'cash' ? Number(p.amount) : 0), 0));
 }
 
 function timelineEntries() {
@@ -477,8 +497,6 @@ onAction('usersTable', {
   restore: (id) => setActive(id, true, 'Account restored.'),
 });
 
-$('usrRole').addEventListener('change', () => applyPinLength('usrRole', 'usrPin'));
-
 $('usrAddBtn').addEventListener('click', async () => {
   const full_name = $('usrName').value.trim();
   const role = $('usrRole').value;
@@ -496,12 +514,23 @@ $('usrAddBtn').addEventListener('click', async () => {
   }
 });
 
+// Another owner's password and two-factor login are theirs alone to change
+// here (or an owner's in Supabase), and roles are changed in Supabase: so no
+// owner can make or take over a second owner account and approve their own
+// voids. The server refuses these too; the dialog just doesn't offer them.
+const isOtherOwner = (user) => user.role === 'owner' && user.id !== session.user?.id;
+
 function openEditStaff(user) {
   if (!user) return;
   editingStaff = { ...user };
   $('editStaffName').value = user.full_name;
   $('editStaffRole').value = user.role;
   $('editStaffPin').value = '';
+  $('editStaffPin').disabled = isOtherOwner(user);
+  $('editStaffNote').hidden = !isOtherOwner(user);
+  $('editStaffNote').textContent = isOtherOwner(user)
+    ? `Only ${user.full_name} can change their own password and two-factor login. If they forget the password or lose their phone, it's reset in Supabase.`
+    : '';
   applyPinLength('editStaffRole', 'editStaffPin');
   setStatus('editStaffStatus');
   refreshTwoFa();
@@ -509,16 +538,11 @@ function openEditStaff(user) {
 }
 
 function refreshTwoFa() {
-  $('editStaffTwoFaSection').hidden = $('editStaffRole').value !== 'owner';
+  $('editStaffTwoFaSection').hidden = editingStaff?.role !== 'owner' || isOtherOwner(editingStaff);
   const on = !!editingStaff?.totp_enabled;
   $('editStaffTwoFaStatus').textContent = on ? 'On' : 'Off';
   $('editStaffTwoFaToggle').textContent = on ? 'Turn off' : 'Set up';
 }
-
-$('editStaffRole').addEventListener('change', () => {
-  applyPinLength('editStaffRole', 'editStaffPin');
-  refreshTwoFa();
-});
 
 $('editStaffSubmitBtn').addEventListener('click', async () => {
   const full_name = $('editStaffName').value.trim();
@@ -602,11 +626,21 @@ const AUDIT_TEXT = {
   batch_oversold: (a, d) => `Sold ${qty(d.oversold_by)} more ${a.subject ?? 'of an item'} than the stock count showed`,
   return_accepted: (a, d) => `Return accepted: ${qty(d.quantity_returned)} × ${a.subject ?? 'an item'} (${d.condition ?? ''})`,
   manual_stock_adjustment: (a, d) => `Couldn't take ${qty(d.short_by)} ${a.subject ?? 'of an item'} out of the ${d.location ?? 'store'}: not enough in stock`,
-  timestamp_anomaly_clamped: (a) => `A delivery of ${a.subject ?? 'an item'} was dated in the future (a device's clock is wrong), so its date was corrected`,
+  timestamp_anomaly_clamped: (a) => `${a.entity_type === 'sale' ? `Sale ${a.subject ?? ''}` : `A delivery of ${a.subject ?? 'an item'}`} was dated in the future (a device's clock is wrong), so its date was corrected`,
   customer_anonymized: () => "A customer's name and phone number were removed on request",
+  price_override: (a, d) => `${d.product_name ?? 'An item'} sold at ${peso(d.sold_at)}, below its price of ${peso(d.listed_at)} (sale ${a.subject ?? ''})`,
+  owner_account_changed: (a, d) => ({
+    added: `Owner account added: ${a.subject}`,
+    deactivated: `Owner account deactivated: ${a.subject}`,
+    reactivated: `Owner account restored: ${a.subject}`,
+    password_reset: `Password reset for owner ${a.subject}`,
+    two_factor_off: `Two-factor login turned off for owner ${a.subject}`,
+    role: `${a.subject} changed from ${d.from} to ${d.to}`,
+  })[d.change] ?? `Owner account changed: ${a.subject}`,
 };
 const describeAudit = (a) => AUDIT_TEXT[a.action_type]?.(a, a.details ?? {}) ?? humanize(a.action_type);
-const auditWho = (a) => [a.actor?.full_name, a.approver && a.approver.id !== a.actor?.id ? `approved by ${a.approver.full_name}` : null]
+const auditWho = (a) => [a.actor?.full_name ?? (a.terminal_id === 'sql-editor' ? 'In Supabase' : null),
+  a.approver && a.approver.id !== a.actor?.id ? `approved by ${a.approver.full_name}` : null]
   .filter(Boolean).join(', ') || '—';
 
 const auditRow = (a) => `

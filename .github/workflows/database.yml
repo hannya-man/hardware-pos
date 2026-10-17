@@ -1,0 +1,77 @@
+# Keeps the Supabase database in step with this repository. After the server
+# tests pass, it runs the API file (supabase/migrations/20261015000001_pos_api.sql)
+# and every migration after 20261016000000_security_controls.sql, each written
+# to be safe to run again, in one transaction: all of it applies, or none of
+# it does. Runs when any of them changes on main, or by hand (Actions >
+# Update the database > Run workflow). The reason for a failure is written on
+# the run's page.
+#
+# Uses the SUPABASE_DB_URL secret the nightly backup needs too (Supabase >
+# Connect > Session pooler, with the database password: see DEPLOY.md).
+
+name: Update the database
+
+on:
+  push:
+    branches: [main]
+    paths: ['supabase/migrations/**', '.github/workflows/database.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: database
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: tests/package-lock.json
+
+      - name: Server tests first
+        working-directory: tests
+        run: |
+          npm ci
+          node sql.test.mjs
+
+      - name: Check the database secret
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+        run: |
+          if [ -z "$SUPABASE_DB_URL" ]; then
+            echo "::error::Add the SUPABASE_DB_URL secret (see DEPLOY.md), then run this again."
+            exit 1
+          fi
+          # GitHub hides the whole connection string in the log; the password on its own too.
+          password="${SUPABASE_DB_URL#*://}"
+          password="${password%@*}"
+          echo "::add-mask::${password#*:}"
+
+      - name: Apply to Supabase
+        env:
+          SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PGCONNECT_TIMEOUT: '20'
+        run: |
+          command -v psql > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
+          files=(-f supabase/migrations/20261015000001_pos_api.sql)
+          for f in supabase/migrations/*.sql; do
+            if [[ "$(basename "$f")" > "20261016000000_security_controls.sql" ]]; then files+=(-f "$f"); fi
+          done
+          echo "Applying ${files[*]}"
+          if ! psql "$SUPABASE_DB_URL" --no-psqlrc -v ON_ERROR_STOP=1 --single-transaction \
+              -c 'set client_min_messages to warning' "${files[@]}" > psql.log 2>&1; then
+            cat psql.log
+            why=$(awk 'NF' psql.log | tail -n 3)
+            why=${why//'%'/%25}
+            echo "::error::The database update failed, so nothing was changed:%0A${why//$'\n'/%0A}"
+            exit 1
+          fi
+          echo "::notice::The database is up to date with this commit."

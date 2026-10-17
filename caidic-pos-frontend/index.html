@@ -295,6 +295,7 @@
               <button type="button" class="btn btn-sm" id="shiftDownloadBtn"><span data-icon="download"></span>Download</button>
             </div>
             <div class="stat-row stat-row-4" id="shiftStats"></div>
+            <p class="note note-warn" id="shiftCashCheck" hidden></p>
           </div>
           <div class="card">
             <div class="card-head">
@@ -341,13 +342,10 @@
       <!-- Staff -->
       <section id="viewStaff" class="view stack" hidden>
         <div class="card">
-          <div class="card-head"><h2>Add staff</h2></div>
+          <div class="card-head"><h2>Add a cashier</h2><span class="muted">Owner accounts are added in Supabase</span></div>
           <div class="inline-form">
             <div class="field"><label for="usrName">Full name</label><input id="usrName" class="input" type="text" autocomplete="off"></div>
-            <div class="field">
-              <label for="usrRole">Role</label>
-              <select id="usrRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
-            </div>
+            <input type="hidden" id="usrRole" value="cashier">
             <div class="field"><label for="usrPin">User password</label><input id="usrPin" class="input" type="password" inputmode="numeric" autocomplete="new-password"></div>
             <button type="button" class="btn btn-primary" id="usrAddBtn">Add</button>
           </div>
@@ -388,6 +386,8 @@
               <option value="manual_stock_adjustment">Counts below zero</option>
               <option value="timestamp_anomaly_clamped">Wrong device clock</option>
               <option value="customer_anonymized">Customer details removed</option>
+              <option value="price_override">Sold below the price</option>
+              <option value="owner_account_changed">Owner account changes</option>
             </select>
             <div class="toolbar-end">
               <button type="button" class="btn btn-sm" id="auditDownloadBtn"><span data-icon="download"></span>Download</button>
@@ -702,10 +702,11 @@
     <div class="modal-head"><h3 id="editStaffTitle">Edit staff</h3></div>
     <div class="field"><label for="editStaffName">Full name</label><input id="editStaffName" class="input" type="text" data-autofocus></div>
     <div class="field">
-      <label for="editStaffRole">Role</label>
-      <select id="editStaffRole" class="input"><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
+      <label for="editStaffRole">Role <span class="optional">changed in Supabase</span></label>
+      <select id="editStaffRole" class="input" disabled><option value="cashier">Cashier</option><option value="owner">Owner</option></select>
     </div>
     <div class="field"><label for="editStaffPin">New user password <span class="optional">leave blank to keep the current one</span></label><input id="editStaffPin" class="input" type="password" inputmode="numeric" autocomplete="new-password"></div>
+    <p class="note" id="editStaffNote" hidden></p>
     <div class="field" id="editStaffTwoFaSection" hidden>
       <span class="label">Two-factor login</span>
       <div class="setting-row">

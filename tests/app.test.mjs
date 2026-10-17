@@ -163,8 +163,10 @@ const staff = await sync.fetchUsers(true);
 check('staff screen', staff.length === 3 && staff.every((u) => !('pin_hash' in u)));
 const added = await sync.createUser({ full_name: 'Ben Torres', role: 'cashier', pin: '5555' });
 await throws('wrong password length', () => sync.createUser({ full_name: 'X', role: 'cashier', pin: '55' }), (e) => /4-digit/.test(e.message));
+await throws('an owner account is added in Supabase, not in the app', () => sync.createUser({ full_name: 'X', role: 'owner', pin: '555555' }), (e) => /Supabase/.test(e.message));
 await sync.updateUser(added.id, { full_name: 'Ben T.', role: 'cashier' });
-const setup = await sync.setupTwoFactor(owner2);
+await throws("another owner's two-factor login is theirs to set up", () => sync.setupTwoFactor(owner2), (e) => e.status === 422 && /Only/.test(e.message));
+const setup = await sync.setupTwoFactor(owner1); // signed in as owner1: their own
 check('2FA setup', /^otpauth:\/\/totp\//.test(setup.otpauth_url) && setup.secret.length === 32);
 const code = (() => {
   const B32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
@@ -177,12 +179,18 @@ const code = (() => {
   const o = h[19] & 15;
   return String((((h[o] & 0x7f) << 24) | (h[o + 1] << 16) | (h[o + 2] << 8) | h[o + 3]) % 1e6).padStart(6, '0');
 })();
-check('2FA on', (await sync.verifyTwoFactor(owner2, code)).enabled === true);
+check('2FA on', (await sync.verifyTwoFactor(owner1, code)).enabled === true);
 await sync.pullCatalog();
-const synced = await db.users.get(owner2);
-check('offline 2FA check (totp.js) accepts the server secret', synced.totp_enabled && await verifyTotp(synced.totp_secret, code));
-check('offline 2FA check refuses a wrong code', !(await verifyTotp(synced.totp_secret, code === '123456' ? '654321' : '123456')));
-check('2FA off', (await sync.disableTwoFactor(owner2)).enabled === false);
+const synced = await db.users.get(owner1);
+check('the device learns 2FA is on, but never gets the secret', synced.totp_enabled === true && !('totp_secret' in synced), synced);
+await throws('the server sign-in asks for the code', () => sync.requestToken(owner1, '111111'), (e) => e.body?.code_required === true);
+await throws('...and refuses a wrong one', () => sync.requestToken(owner1, '111111', code === '123456' ? '654321' : '123456'), (e) => /wrong or has expired/.test(e.message));
+const login = await sync.requestLogin(owner1, '111111', code);
+check('password + code: a token, with the code checked by the server', !!login.token && login.two_factor_checked === true, login);
+await sync.forgetServerLogin(); // the earlier sign-in, as the app does at every sign-in
+await sync.saveServerLogin(login.token);
+check('totp.js still checks codes (for a server not updated yet)', await verifyTotp(setup.secret, code) && !(await verifyTotp(setup.secret, code === '123456' ? '654321' : '123456')));
+check('2FA off', (await sync.disableTwoFactor(owner1)).enabled === false);
 
 // --- wrong passwords at the till reach the owners' Audit log -----------------
 await sync.recordFailedSignIn({ user_id: cashierId, step: 'password', locked: false });
