@@ -17,6 +17,16 @@ tests/.app-under-test-ui/
 # Decrypted database backups (keep them off the repository)
 pos-backup-*
 
+# Android app packages and the key that signs them. The repository is public,
+# and anyone with the key could publish an "update" to the app.
+RRC POS - Google Play package/
+*.keystore
+*.jks
+*.apk
+*.aab
+*.idsig
+keystore-password.txt
+
 # OS/editor cruft
 .DS_Store
 .vscode/
