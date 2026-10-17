@@ -51,16 +51,19 @@ In the repository on github.com:
    **GitHub Actions**.
 3. **Backups.** Supabase's free plan keeps no backups, so the **Nightly
    backup** workflow makes them, encrypted. Add two more secrets:
-   - `SUPABASE_DB_URL`: in Supabase, **Connect → Session pooler**. Copy the
-     connection string and put the database password in place of
-     `[YOUR-PASSWORD]`. (Forgot the password? Reset it under **Settings >
-     Database**.)
+   - `SUPABASE_DB_URL`: in Supabase, **Connect → Session pooler** (not
+     Direct connection: GitHub can't reach that one). Copy the connection
+     string and replace `[YOUR-PASSWORD]`, brackets included, with the
+     database password. (Forgot the password, or it has symbols like
+     `# / ? %` in it? Reset it under **Settings > Database** to one made of
+     letters and numbers.)
    - `BACKUP_PASSPHRASE`: a long random passphrase, for example five or six
      random words. Keep it in a password manager **and** sealed in the store's
      safe: without it the backups can't be opened.
 
    Then open **Actions → Nightly backup → Run workflow** once to check that
-   it works. After that it runs every night at 02:00.
+   it works. After that it runs by itself every night at about 02:15
+   (GitHub sometimes starts it later). If a run fails, its page says why.
 4. **Protection** (needs the repository owner's account):
    - **Settings > Branches**: add a rule for `main` that requires the **test**
      check to pass before merging.
