@@ -28,6 +28,7 @@ const cartTotal = () => round2(cart.reduce((sum, line) => sum + line.line_total,
 const categoryName = (id) => categories.find((c) => c.id === id)?.name ?? 'Uncategorized';
 
 export async function renderBilling() {
+  showOrder(false);
   await pullCatalog().catch(() => {});
   categories = await db.categories.orderBy('name').toArray();
   if (selectedCategory && !categories.some((c) => c.id === selectedCategory)) selectedCategory = null;
@@ -70,6 +71,18 @@ async function drawGrid() {
           <span class="product-price">${peso(p.unit_price)} <small>/ ${esc(p.unit)}</small></span>
         </button>`).join('')
     : `<p class="empty">${selectedCategory ? 'No items in this category.' : 'No items on this device yet. Tap Sync now, or check the internet connection.'}</p>`;
+  markTiles();
+}
+
+// Items already in the order show how many, so a tap is seen to count even
+// where the order itself is out of sight (phones).
+function markTiles() {
+  const inOrder = new Map(cart.map((line) => [line.product_id, line.quantity]));
+  $('grid').querySelectorAll('.product').forEach((tile) => {
+    const n = inOrder.get(tile.dataset.id);
+    if (n) tile.dataset.qty = qty(n);
+    else delete tile.dataset.qty;
+  });
 }
 
 $('categoryChips').addEventListener('click', (e) => {
@@ -159,8 +172,42 @@ function drawCart() {
   $('chargeBtn').textContent = count ? `Charge ${peso(total)}` : 'Charge';
   $('chargeBtn').disabled = !count;
   $('sendToPickListBtn').disabled = !count;
+  drawCartBar(count, total);
+  markTiles();
   if (checkoutTotal !== null) drawCheckout();
 }
+
+// Phones: the order sits in a sheet that opens from a bar at the bottom of
+// the screen. The bar shows the count and total and can charge straight away.
+// Other screens never show either (style.css).
+let barTotal = 0;
+function drawCartBar(count, total) {
+  $('cartBar').classList.toggle('is-empty', !count);
+  $('cartBarCount').textContent = count;
+  $('cartBarLabel').textContent = `${count} item${count === 1 ? '' : 's'}`;
+  $('cartBarTotal').textContent = peso(total);
+  $('cartBarCharge').disabled = !count;
+  if (total > barTotal) { // something was added: a little nudge
+    $('cartBar').classList.remove('bump');
+    void $('cartBar').offsetWidth;
+    $('cartBar').classList.add('bump');
+  }
+  barTotal = total;
+  if (!count) showOrder(false);
+}
+
+function showOrder(open) {
+  $('viewBilling').classList.toggle('order-open', open);
+  $('cartBarOpen').setAttribute('aria-expanded', String(open));
+}
+
+$('cartBarOpen').addEventListener('click', () => showOrder(true));
+$('cartBarCharge').addEventListener('click', () => $('chargeBtn').click());
+$('orderCloseBtn').addEventListener('click', () => showOrder(false));
+$('orderBackdrop').addEventListener('click', () => showOrder(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('viewBilling').classList.contains('order-open') && !document.querySelector('.overlay:not([hidden])')) showOrder(false);
+});
 
 $('lines').addEventListener('click', (e) => {
   const step = e.target.closest('[data-step]');
@@ -266,8 +313,21 @@ function refreshAmounts() {
   $('creditOwe').textContent = peso(Math.max(0, round2(checkoutTotal - (Number($('creditDown').value) || 0))));
 }
 
-for (const id of ['checkoutCash', 'creditDown']) {
-  $(id).addEventListener('input', (e) => { keepDecimal(e.target); refreshAmounts(); setStatus('checkoutStatus'); });
+for (const [id, row] of [['checkoutCash', 'checkoutChangeRow'], ['creditDown', 'creditOwe']]) {
+  $(id).addEventListener('input', (e) => {
+    keepDecimal(e.target);
+    refreshAmounts();
+    setStatus('checkoutStatus');
+    showAboveButtons($(row).closest('.change-row'));
+  });
+}
+
+// On a small phone the dialog's buttons stay pinned to the bottom of the
+// screen (style.css), and the change can end up underneath them.
+function showAboveButtons(el) {
+  const modal = el.closest('.modal');
+  const covered = el.getBoundingClientRect().bottom + 8 - modal.querySelector('.modal-actions').getBoundingClientRect().top;
+  if (covered > 0) modal.scrollTop += covered;
 }
 for (const id of ['checkoutCash', 'checkoutReference', 'creditDown']) {
   $(id).addEventListener('keydown', (e) => {
