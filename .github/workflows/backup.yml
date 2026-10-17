@@ -1,7 +1,8 @@
 # Nightly backup of the Supabase database, and a daily check that the site
 # and the database answer. Supabase's free plan keeps no backups, so these are
 # the store's copies (docs/compliance/business-continuity.md has the restore
-# steps). GitHub emails the repository owner when either job fails.
+# steps). GitHub emails the repository owner when either job fails, and the
+# reason is written on the run's page, so there's no need to open the log.
 #
 # Each backup (roles, schema and data, as SQL) is encrypted on the runner with
 # BACKUP_PASSPHRASE before it is stored, and kept as a workflow artifact for
@@ -18,7 +19,12 @@ name: Nightly backup
 
 on:
   schedule:
-    - cron: '0 18 * * *' # 02:00 in Manila, after closing
+    # 02:17 in Manila, after closing. GitHub delays, and sometimes drops,
+    # scheduled runs at the top of the hour, when it's busiest.
+    - cron: '17 18 * * *'
+  push: # a change to this file is tried straight away
+    branches: [main]
+    paths: [.github/workflows/backup.yml]
   workflow_dispatch:
 
 permissions:
@@ -35,15 +41,23 @@ jobs:
         run: |
           owner="${GITHUB_REPOSITORY%%/*}"
           site="https://${owner,,}.github.io/${GITHUB_REPOSITORY#*/}/"
-          curl -fsS -o /dev/null "$site" || { echo "::error::The site at $site didn't answer."; exit 1; }
-          curl -fsS -o /dev/null -X POST "$SUPABASE_URL/rest/v1/rpc/pos_ping" \
-            -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H "Content-Type: application/json" -d '{}' \
-            || { echo "::error::Supabase didn't answer. If the project was paused, restore it from the Supabase dashboard."; exit 1; }
+          # Retrying for two minutes rides out a brief blip. Prints curl's
+          # reason if it still fails.
+          get() { curl -fsS --retry 4 --retry-delay 30 --retry-all-errors --max-time 30 -o /dev/null "$@" 2>&1; }
+          if ! why=$(get "$site"); then
+            echo "::error::The site at $site didn't answer (${why##*$'\n'})."
+            exit 1
+          fi
+          if ! why=$(get -X POST "$SUPABASE_URL/rest/v1/rpc/pos_ping" \
+              -H "apikey: $SUPABASE_PUBLISHABLE_KEY" -H "Content-Type: application/json" -d '{}'); then
+            echo "::error::Supabase didn't answer (${why##*$'\n'}). If the project was paused, restore it from the Supabase dashboard."
+            exit 1
+          fi
 
   backup:
     runs-on: ubuntu-latest
     steps:
-      - name: Check the backup secrets are set
+      - name: Check the backup secrets
         env:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
           BACKUP_PASSPHRASE: ${{ secrets.BACKUP_PASSPHRASE }}
@@ -52,6 +66,29 @@ jobs:
             echo "::error::Add the SUPABASE_DB_URL and BACKUP_PASSPHRASE secrets (see DEPLOY.md), then run this again."
             exit 1
           fi
+          # GitHub hides the whole connection string in the log. Hide the
+          # password on its own too, in case a tool prints it separately.
+          password="${SUPABASE_DB_URL#*://}"
+          password="${password%@*}"
+          echo "::add-mask::${password#*:}"
+          # The usual copying mistakes, each with what to do about it.
+          case "$SUPABASE_DB_URL" in
+            postgres://* | postgresql://*) ;;
+            *)
+              echo "::error::SUPABASE_DB_URL should start with postgresql:// . Copy the whole connection string, without quotes or anything in front of it."
+              exit 1 ;;
+          esac
+          case "$SUPABASE_DB_URL" in
+            *YOUR-PASSWORD* | *\[* | *\]*)
+              echo "::error::In SUPABASE_DB_URL, replace [YOUR-PASSWORD] with the database password. The square brackets go too."
+              exit 1 ;;
+            *@db.*.supabase.co[:/]*)
+              echo "::error::SUPABASE_DB_URL is the Direct connection string, which GitHub can't reach (it's IPv6 only). In Supabase, open Connect and copy the Session pooler string instead."
+              exit 1 ;;
+            *:6543/*)
+              echo "::error::SUPABASE_DB_URL is the Transaction pooler string. In Supabase, open Connect and copy the Session pooler string (port 5432) instead."
+              exit 1 ;;
+          esac
 
       - uses: supabase/setup-cli@v3
         with:
@@ -62,9 +99,21 @@ jobs:
           SUPABASE_DB_URL: ${{ secrets.SUPABASE_DB_URL }}
         run: |
           mkdir backup
-          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/roles.sql --role-only
-          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/schema.sql
-          supabase db dump --db-url "$SUPABASE_DB_URL" -f backup/data.sql --data-only --use-copy
+          # If a dump fails, its last lines of output become the error message.
+          dump() {
+            if supabase db dump --db-url "$SUPABASE_DB_URL" "$@" 2> dump.log; then
+              cat dump.log >&2
+            else
+              cat dump.log >&2
+              why=$(tr '\r' '\n' < dump.log | awk 'NF && !/^Try rerunning/' | tail -n 4)
+              why=${why//'%'/%25}
+              echo "::error::The database dump failed:%0A${why//$'\n'/%0A}"
+              exit 1
+            fi
+          }
+          dump -f backup/roles.sql --role-only
+          dump -f backup/schema.sql
+          dump -f backup/data.sql --data-only --use-copy
           grep -q 'sales' backup/data.sql || { echo "::error::The data dump has no sales in it."; exit 1; }
 
       - name: Encrypt it

@@ -106,8 +106,8 @@ site, the devices it runs on, and everyone who uses them.
 
 ## 6. Backups
 
-- The database is backed up every night at 02:00, encrypted with AES-256,
-  and kept for 30 days (GitHub **Actions → Nightly backup**).
+- The database is backed up every night at about 02:15, encrypted with
+  AES-256, and kept for 30 days (GitHub **Actions → Nightly backup**).
 - The passphrase is kept in a password manager and as a sealed copy in the
   store's safe. Without it, the backups can't be opened.
 - Never keep unencrypted copies on shared drives or USB sticks. Delete
