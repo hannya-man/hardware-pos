@@ -27,19 +27,24 @@ runs on in the store, and the people who use and run it.
 | **ISO/IEC 27017** (cloud security) | Clear split of security duties with cloud providers, plus cloud-specific controls | Only the POS functions are reachable with the public key; data is encrypted when backed up; daily health check | Two-factor login on the Supabase and GitHub accounts; keep the providers' security reports; follow the exit plan if leaving | [Statement of Applicability, cloud section](statement-of-applicability.md#isoiec-27017-cloud-services) |
 | **ISO 22301** (business continuity) | Know what's critical, how long it can stop, and prove recovery works | Selling works offline; the app opens offline; sales sync later; nightly backups | Keep a spare device; test a restore every quarter; run a yearly drill | [Business continuity plan](business-continuity.md) |
 | **ISO/IEC 20000-1** (IT service management) | Defined service, requests, incidents, changes, releases, suppliers | Every change is tested before it's published; releases are automatic and recorded; health checks | Handle requests and incidents the documented way; record them as GitHub issues | [Service and quality management](service-management.md) |
-| **ISO 9001** (quality management) | Quality objectives, controlled processes, fixing what goes wrong, continual improvement | 380+ automated checks run on every change, including the app used end to end in a simulated browser; a release is blocked if any fails | Track problems and fixes; yearly internal audit and management review | [Service and quality management](service-management.md#quality-management-iso-9001) |
+| **ISO 9001** (quality management) | Quality objectives, controlled processes, fixing what goes wrong, continual improvement | 440+ automated checks run on every change, including the app used end to end in a simulated browser; a release is blocked if any fails | Track problems and fixes; yearly internal audit and management review | [Service and quality management](service-management.md#quality-management-iso-9001) |
 | **ISO/IEC 42001** (AI management) | Governance of AI systems an organization builds or uses | Not applicable: the POS has no AI features | Covered by the normal change process: code written with AI help is tested and reviewed like any other change | [Service and quality management](service-management.md#ai-isoiec-42001) |
 
 ## What the system does, at a glance
 
-- **Who can do what.** Each device needs its own key. Each person has their
-  own password: 4 digits for cashiers, 6 for owners, with optional two-factor
-  login. Every server function checks the role. The database tables can't be
+- **Who can do what.** Each device needs its own key, and a key can be
+  replaced without losing what the device holds. Each person has their own
+  password: 4 digits for cashiers, 6 for owners, with optional two-factor
+  login whose codes only the server checks (no device holds the secret).
+  Every server function checks the role. The database tables can't be
   reached with the key the app ships with, and cost prices never leave the
   server.
-- **Money controls.** A void needs two different owners within 10 minutes.
+- **Money controls.** A void needs two different owners within 10 minutes,
+  and owner accounts are made, and their sign-in reset, only in Supabase, so
+  no owner can make or take over a second owner to approve their own void.
   End-of-shift cash counts are blind: the expected amount shows only after
-  the count. Sales, payments and logs can't be edited or deleted.
+  the count, and a closed shift's count can't be changed afterwards. Sales,
+  payments and logs can't be edited or deleted.
 - **Records.** Each shift has a timeline of everything done in it. The Audit
   log screen lists what needs an owner's eyes: wrong passwords, cash
   differences, voids, overselling, returns, and wrong device clocks. Both can
@@ -50,9 +55,11 @@ runs on in the store, and the people who use and run it.
   everywhere at once. A till left alone locks itself after 10 minutes, and one
   reopened later (the next morning, say) asks for a password again.
 - **Checks on what tills send.** The server refuses a sale that arrives
-  already voided, a total that isn't what its lines add up to, or audit
-  events only the server may write. A record it refuses shows on the till as
-  "not synced" until it's sorted out.
+  already voided, a total that isn't what its lines add up to, stock taken
+  that isn't what was sold (or is another item's), a change to a sale already
+  recorded, or audit events only the server may write. A sale below the
+  listed price, or dated days ahead, is kept but put on the Audit log. A
+  record it refuses shows on the till as "not synced" until it's sorted out.
 - **Protection in the browser.** A Content-Security-Policy stops the app from
   running anything but its own code or talking to anything but its own
   database. It refuses to run inside another site's frame.

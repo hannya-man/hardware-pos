@@ -260,7 +260,8 @@ try {
       return { id: randomUUID(), entity_type: 'sale', payload: {
         sale: { id: saleId, terminal_id: 'seed', cashier_id: anaId, shift_id: null, subtotal: product.price, total_amount: product.price, payment_method: 'cash', amount_tendered: product.price, change_amount: 0, amount_paid: product.price, status: 'completed', client_created_at: new Date(Date.now() - (batch * 40 + n + 1) * 1000).toISOString() },
         items: [{ id: randomUUID(), sale_id: saleId, product_id: product.id, sku_snapshot: product.sku, name_snapshot: product.name, unit_price_snapshot: product.price, quantity: 1, line_discount: 0, line_total: product.price }],
-        movements: [],
+        // As the till sends it: the unit sold comes off the stock (no batch: like a till with an old copy)
+        movements: [{ id: randomUUID(), product_id: product.id, batch_id: null, terminal_id: 'seed', delta: -1, reason: 'sale', reference_id: saleId, actor_id: anaId, client_created_at: new Date().toISOString() }],
       } };
     });
     const res = await rpc(server, 'pos_sync_push', { auth: { terminal_id: 'seed', terminal_key: terminalKey }, args: { items } });
@@ -287,6 +288,22 @@ try {
   await waitFor('the voided state', () => $('voidState').textContent.includes('Voided'));
   $('voidOverlay').querySelector('[data-close]').click();
 
+  // The till's key is replaced (say the old one leaked): Sync now asks for
+  // the new one, checks it with the server, and sends what waited meanwhile.
+  await server.query(`update public.terminals set is_active = false`);
+  const newKey = (await one(`select pos.add_terminal('Front counter, new key') as k`)).k;
+  await openScreen('stock'); // logs "view_opened": something waiting to be sent
+  const waiting = await waitFor('something waiting to be sent', async () => (await appDb.db.outbox_queue.toArray())
+    .find((i) => i.payload.event_type === 'view_opened' && i.payload.details?.view === 'stock')?.payload.id);
+  $('syncNowBtn').click();
+  const keyPrompt = await waitFor('the new-key prompt', () => [...doc.querySelectorAll('.overlay-top')].find((o) => o.textContent.includes('new key')), 30_000);
+  keyPrompt.querySelector('input').value = 'WRONG-KEY-1234';
+  keyPrompt.querySelector('[data-ok]').click();
+  await waitFor('a wrong key refused in the dialog', () => !keyPrompt.querySelector('.dialog-error').hidden && keyPrompt.querySelector('.dialog-error').textContent.includes("doesn't accept"));
+  await answer(newKey);
+  await waitFor('what waited reaches the server with the new key', async () => (await one(`select count(*)::int n from public.activity_log where id = $1`, [waiting])).n === 1, 30_000);
+  check('a replaced key: asked for, checked, saved', (await appDb.getTerminalKey()) === newKey);
+
   // Left alone, the till locks itself; the shift stays open.
   const realNow = Date.now;
   Date.now = () => realNow() + 11 * 60_000;
@@ -306,6 +323,26 @@ try {
   await import(new URL('main.js', SECOND));
   await waitFor('the sign-in screen after reopening', () => $('staffGrid').querySelectorAll('.staff-card').length === 3);
   check('reopened the next day: nobody is signed in', $('appShell').hidden && !$('loginScreen').hidden && (await appDb.getSyncMeta('current_user_id')) === null);
+
+  // An owner with two-factor login: the server checks the code (the till
+  // never gets the secret) and refuses a wrong one.
+  const carloId = (await one(`select id from public.users where full_name = 'Carlo Cruz'`)).id;
+  const carloSecret = 'JBSWY3DPEHPK3PXPJBSWY3DPEHPK3PXP';
+  await server.query(`update public.users set totp_secret = $1, totp_enabled = true where id = $2`, [carloSecret, carloId]);
+  $('syncNowLoginBtn').click();
+  await waitFor('the till learns Carlo uses two-factor login', async () => (await appDb.db.users.get(carloId))?.totp_enabled === true);
+  check('...but never gets the secret', !('totp_secret' in (await appDb.db.users.get(carloId))));
+  await signIn('Carlo Cruz', '222222');
+  await waitFor('the code step', () => $('pinPrompt').textContent.includes('authenticator'));
+  const codeNow = async () => (await one(`select pos.totp_code($1, floor(extract(epoch from now()) / 30)::bigint) as c`, [carloSecret])).c;
+  const rightCode = await codeNow();
+  for (const d of rightCode === '000000' ? '111111' : '000000') $('keypad').querySelector(`[data-key="${d}"]`).click();
+  await waitFor('a wrong code refused by the server', () => $('loginError').textContent.includes('wrong or has expired'));
+  for (const d of await codeNow()) $('keypad').querySelector(`[data-key="${d}"]`).click();
+  await answer('0'); // Carlo's shift starts
+  await waitFor('the dashboard, on the server sign-in made with the code', () => !$('viewDashboard').hidden && $('dashSales').textContent.includes('₱'));
+  check('an owner with 2FA signs in on a code the server checked', (await one(`select count(*)::int n from public.audit_logs
+    where action_type = 'failed_pin_attempt' and entity_id = $1 and details->>'step' = 'code' and details->>'checked' = 'server'`, [carloId])).n === 1);
 } catch (err) {
   errors.push(err.stack ?? String(err));
 }

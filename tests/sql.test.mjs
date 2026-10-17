@@ -78,6 +78,9 @@ for (const sql of [
   `select pos.add_staff('Hacker', 'owner', '999999')`,
   `select pos.add_terminal('Hacker')`,
   `select pos.check_pin(gen_random_uuid(), '1234')`,
+  `select pos.reset_password(gen_random_uuid(), '1234')`,
+  `select pos.set_role(gen_random_uuid(), 'owner', '123456')`,
+  `select pos.turn_off_two_factor(gen_random_uuid())`,
 ]) {
   let code = null;
   try {
@@ -101,6 +104,7 @@ check('catalog products', catalog.products.length === 194, catalog.products.leng
 check('catalog hides cost_price', catalog.products.every((p) => !('cost_price' in p)));
 check('catalog categories', catalog.categories.length === 12);
 check('catalog users', catalog.users.length === 4);
+check('catalog users carry no two-factor secret', catalog.users.every((u) => !('totp_secret' in u) && 'totp_enabled' in u));
 check('catalog batches', catalog.stock_batches.length === 194);
 check('catalog voided_sales empty', Array.isArray(catalog.voided_sales) && catalog.voided_sales.length === 0);
 check('catalog server_time is ISO UTC', /^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(\.\d+)?\+00:00$/.test(catalog.server_time), catalog.server_time);
@@ -251,6 +255,32 @@ await tamper('a sale line on its own', { id: randomUUID(), entity_type: 'sale_it
 await tamper('a stock movement on its own', { id: randomUUID(), entity_type: 'stock_movement', payload: { id: randomUUID(), product_id: cement.product.id, delta: 999, reason: 'stock_receipt' } }, 'part of its sale');
 await tamper('a payment of nothing', { id: randomUUID(), entity_type: 'credit_payment', payload: { id: randomUUID(), customer_id: customerId, amount: 0, payment_method: 'cash', received_by: cashier, client_created_at: nowIso() } }, 'above zero');
 await tamper('a delivery whose counts don\'t add up', { id: randomUUID(), entity_type: 'stock_batch', payload: { id: randomUUID(), product_id: cement.product.id, location: 'store', received_at: nowIso(), qty_received: 5, qty_good_remaining: 50, qty_damaged: 0, source: 'receiving', created_by: cashier, client_created_at: nowIso() } }, 'add up');
+// Stock taken has to be what was sold, from the item's own store batches.
+const cementBeforeTamper = await cementLeft();
+await tamper('a 1-bag sale that takes 11 bags off the count', forged((p) => { p.movements[0].delta = -11; }), 'stock taken');
+await tamper('a sale that takes less stock than it sold', forged((p) => { p.movements[0].delta = -0.5; }), 'stock taken');
+await tamper('a sale that takes nothing off the count', forged((p) => { p.movements = []; }), 'stock taken');
+await tamper("a sale that takes another item's stock", forged((p) => { p.movements[0].batch_id = rebar.batch.id; }), 'another item');
+await tamper("a sale that takes the warehouse's stock", (() => {
+  const s = saleItem({ sale: randomUUID(), lines: [{ product: rebar.product, batch: { id: deliveryId }, qty: 1 }], tendered: 500 });
+  return s;
+})(), 'warehouse');
+check('refused sales took no stock', near(await cementLeft(), cementBeforeTamper));
+// A sale sent again under its id can't gain lines or take more stock.
+{
+  const resend = structuredClone(cashSale);
+  resend.id = randomUUID();
+  const extra = { ...rebar, qty: 5 };
+  resend.payload.items.push({ id: randomUUID(), sale_id: cashSaleId, product_id: rebar.product.id, sku_snapshot: rebar.product.sku, name_snapshot: rebar.product.name, unit_price_snapshot: Number(rebar.product.unit_price), quantity: extra.qty, line_discount: 0, line_total: extra.qty * Number(rebar.product.unit_price), voided_at: null, voided_by: null });
+  resend.payload.movements.push({ id: randomUUID(), product_id: rebar.product.id, batch_id: rebar.batch.id, terminal_id: 'term-1', delta: -extra.qty, reason: 'sale', reference_id: cashSaleId, actor_id: cashier, client_created_at: nowIso() });
+  resend.payload.sale.total_amount = resend.payload.sale.subtotal = resend.payload.items.reduce((t, i) => t + i.line_total, 0);
+  const rebarBefore = Number((await one(`select qty_good_remaining from public.stock_batches where id = $1`, [rebar.batch.id])).qty_good_remaining);
+  res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [resend] } });
+  check('a sale sent again with an extra line is taken as a resend', res.body.results[resend.id]?.ok, res.body);
+  check('...and adds nothing to the recorded sale', (await one(`select count(*)::int n from public.sale_items where sale_id = $1`, [cashSaleId])).n === 2
+    && near((await one(`select total_amount from public.sales where id = $1`, [cashSaleId])).total_amount, cashSale.payload.sale.total_amount)
+    && near((await one(`select qty_good_remaining from public.stock_batches where id = $1`, [rebar.batch.id])).qty_good_remaining, rebarBefore));
+}
 const prePicked = { id: randomUUID(), entity_type: 'material_request', payload: { id: randomUUID(), terminal_id: 'term-1', sale_id: null, requested_by: cashier, items: [], status: 'fulfilled', fulfilled_by: owner1, fulfilled_at: nowIso(), client_created_at: nowIso() } };
 await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [prePicked] } });
 check('a pick list arrives waiting, whatever the terminal says', (await one(`select status, fulfilled_by from public.material_requests where id = $1`, [prePicked.payload.id])).status === 'pending');
@@ -262,6 +292,9 @@ await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), 
 res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'shift_log', payload: shiftOpen }] } });
 check('late shift start accepted but ignored', res.body && Object.values(res.body.results)[0].ok);
 check('shift stays closed', (await one(`select status, counted_cash from public.shift_logs where id = $1`, [shiftId])).status === 'closed');
+await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'shift_log', payload: { ...shiftClosed, counted_cash: 1290, cash_discrepancy: 0 } }] } });
+const recount = await one(`select counted_cash, cash_discrepancy from public.shift_logs where id = $1`, [shiftId]);
+check('a second "closed" can\'t rewrite the cash count', near(recount.counted_cash, 1280) && near(recount.cash_discrepancy, -10), recount);
 await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'customer', payload: { id: customerId, phone: '0918' } }] } });
 check('customer edit keeps the fields not sent', (await one(`select name, phone from public.customers where id = $1`, [customerId])).name === 'Juan Dela Cruz');
 
@@ -450,50 +483,116 @@ refused('void needs two owners', await (async () => {
 res = await rpc(db, 'pos_users', { auth: U(o1), args: { include_archived: false } });
 check('staff list', res.body.length === 4 && res.body.every((u) => !('pin_hash' in u)), res.body);
 refused('cashier password length', await rpc(db, 'pos_user_create', { auth: U(o1), args: { full_name: 'Ben', role: 'cashier', pin: '123456' } }), 422, '4-digit');
-refused('owner password length', await rpc(db, 'pos_user_create', { auth: U(o1), args: { full_name: 'Ben', role: 'owner', pin: '1234' } }), 422, 'An owner account needs a 6-digit');
+refused('an owner account is not added in the app', await rpc(db, 'pos_user_create', { auth: U(o1), args: { full_name: 'Ben', role: 'owner', pin: '123456' } }), 422, 'added in Supabase');
 res = await rpc(db, 'pos_user_create', { auth: U(o1), args: { full_name: '  Ben Reyes ', role: 'cashier', pin: '4321' } });
 ok('staff added', res);
 const ben = res.body;
 check('staff added trimmed, no secrets', ben.full_name === 'Ben Reyes' && !('pin_hash' in ben), ben);
-res = await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: ben.id, full_name: 'Ben R.', role: 'owner', pin: '654321' } });
-ok('staff edited', res);
-check('promoted', res.body.role === 'owner');
+refused('a role is not changed in the app', await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: ben.id, role: 'owner' } }), 422, 'changed in Supabase');
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: ben.id, pin: '4321' } });
+const benOldToken = res.body.token;
+res = await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: ben.id, full_name: 'Ben R.', role: 'cashier', pin: '6543' } });
+ok('staff edited (the role sent unchanged)', res);
+check('edited', res.body.full_name === 'Ben R.' && res.body.role === 'cashier', res.body);
 check('staff_updated logged without the password', (await one(`select details from public.activity_log where event_type = 'staff_updated'`)).details.pin_reset === true);
+refused('a password reset by someone else signs them out', await rpc(db, 'pos_customers', { auth: U(benOldToken), args: {} }), 401);
+ok('new password works', await rpc(db, 'pos_login', { auth: T(), args: { user_id: ben.id, pin: '6543' } }));
+refused("another owner's password is theirs to change", await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner2, pin: '999999' } }), 422, 'Only Owner Two');
+check("another owner's password unchanged", (await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222' } })).status === 200);
+ok('an owner changes their own password', await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner1, pin: '111111' } }));
+ok('...and stays signed in', await rpc(db, 'pos_users', { auth: U(o1), args: {} }));
+
+// Owner accounts are made, and their sign-in reset, in the SQL Editor; each
+// change is on the owners' Audit log.
+const ownerChanges = async (userId) => (await all(`select actor_id, terminal_id, details from public.audit_logs
+  where action_type = 'owner_account_changed' and entity_id = $1 order by created_at`, [userId])).map((r) => r.details.change);
+check('owners added in the SQL Editor are audited', (await ownerChanges(owner1)).join() === 'added' && (await ownerChanges(owner2)).join() === 'added');
+check('set_role makes an owner, with a 6-digit password', /now an owner/.test((await one(`select pos.set_role($1, 'owner', '654321') as m`, [ben.id])).m));
+check('...audited', (await ownerChanges(ben.id)).join() === 'role');
 res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: ben.id, pin: '654321' } });
-ok('new password works', res);
+ok('the new owner signs in', res);
 const benToken = res.body.token;
 res = await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: ben.id, is_active: false } });
 ok('deactivated', res);
+check('an owner deactivated by another owner is audited', (await ownerChanges(ben.id)).join() === 'role,deactivated'
+  && (await one(`select actor_id from public.audit_logs where action_type = 'owner_account_changed' and entity_id = $1 order by created_at desc limit 1`, [ben.id])).actor_id === owner1);
 refused('deactivated account signed out everywhere', await rpc(db, 'pos_customers', { auth: U(benToken), args: {} }), 401);
 refused('deactivated account cannot sign in', await rpc(db, 'pos_login', { auth: T(), args: { user_id: ben.id, pin: '654321' } }), 422);
 await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner2, is_active: false } });
 refused('last owner stays an owner', await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner1, role: 'cashier' } }), 422, 'only owner');
 refused('last owner stays active', await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner1, is_active: false } }), 422, 'only owner');
+{
+  let refusal = null;
+  try { await db.query(`select pos.set_role($1, 'cashier', '1111')`, [owner1]); } catch (err) { refusal = err.message; }
+  check('set_role keeps the last owner an owner', /only owner/.test(refusal ?? ''), refusal);
+}
 await rpc(db, 'pos_user_update', { auth: U(o1), args: { id: owner2, is_active: true } });
 res = await rpc(db, 'pos_users', { auth: U(o1), args: { include_archived: true } });
 check('archived staff on request', res.body.length === 5 && res.body.some((u) => u.id === ben.id && !u.is_active));
+const o2BeforeReset = (await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222' } })).body.token;
+await db.query(`update public.users set locked_until = now() + interval '1 minute', failed_pin_attempts = 5 where id = $1`, [owner2]);
+check('reset_password: a forgotten password, a lock lifted', /was changed/.test((await one(`select pos.reset_password($1, '222222') as m`, [owner2])).m)
+  && (await one(`select locked_until from public.users where id = $1`, [owner2])).locked_until === null);
+check('...audited', (await ownerChanges(owner2)).join() === 'added,deactivated,reactivated,password_reset');
+refused('...and signed out everywhere', await rpc(db, 'pos_users', { auth: U(o2BeforeReset), args: {} }), 401);
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222' } });
+const o2b = res.body.token;
 
-// Two-factor
+// Two-factor: each owner sets up their own, and the server checks the codes.
 refused('2FA only for owners', await rpc(db, 'pos_two_factor_setup', { auth: U(o1), args: { id: cashier } }), 422, 'only available for owner');
-res = await rpc(db, 'pos_two_factor_setup', { auth: U(o1), args: { id: owner2 } });
+refused("2FA for another owner is theirs to set up", await rpc(db, 'pos_two_factor_setup', { auth: U(o1), args: { id: owner2 } }), 422, 'Only Owner Two');
+res = await rpc(db, 'pos_two_factor_setup', { auth: U(o2b), args: { id: owner2 } });
 ok('2FA setup', res);
 const secret = res.body.secret;
 check('2FA secret is 32 base32 chars', /^[A-Z2-7]{32}$/.test(secret), secret);
 check('otpauth url', res.body.otpauth_url === `otpauth://totp/RRC%20Merchandise%3AOwner%20Two?secret=${secret}&issuer=RRC%20Merchandise&algorithm=SHA1&digits=6&period=30`, res.body.otpauth_url);
-refused('2FA wrong code', await rpc(db, 'pos_two_factor_verify', { auth: U(o1), args: { id: owner2, code: totpNow(secret) === '000000' ? '111111' : '000000' } }), 422, 'did not match');
-res = await rpc(db, 'pos_two_factor_verify', { auth: U(o1), args: { id: owner2, code: totpNow(secret) } });
+const wrongCode = totpNow(secret) === '000000' ? '111111' : '000000';
+refused('2FA wrong code', await rpc(db, 'pos_two_factor_verify', { auth: U(o2b), args: { id: owner2, code: wrongCode } }), 422, 'did not match');
+refused("2FA confirmed only by its owner", await rpc(db, 'pos_two_factor_verify', { auth: U(o1), args: { id: owner2, code: totpNow(secret) } }), 422, 'Only Owner Two');
+res = await rpc(db, 'pos_two_factor_verify', { auth: U(o2b), args: { id: owner2, code: totpNow(secret) } });
 check('2FA on with a real authenticator code', res.status === 200 && res.body.enabled === true, res);
 res = await rpc(db, 'pos_catalog', { auth: T(), args: { since: catalog.server_time } });
 const synced = res.body.users.find((u) => u.id === owner2);
-check('2FA secret syncs for offline sign-in', synced?.totp_secret === secret && synced.totp_enabled === true);
+check('the 2FA secret stays on the server: tills only learn that it is on', synced && !('totp_secret' in synced) && synced.totp_enabled === true, synced);
+check('no account reaches a till with a 2FA secret', res.body.users.every((u) => !('totp_secret' in u)));
+
+// Server sign-in for an owner with 2FA: password, then code.
+const owner2Attempts = async () => (await one(`select failed_pin_attempts n from public.users where id = $1`, [owner2])).n;
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222' } });
+check('the right password alone asks for the code', res.status === 422 && res.body.code_required === true && /authenticator code/.test(res.body.message), res);
+check('...without counting as a wrong try', (await owner2Attempts()) === 0);
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '999999', code: totpNow(secret) } });
+check('a wrong password with a right code is still a wrong password', res.status === 422 && !res.body.code_required && /isn't right/.test(res.body.message), res);
+await db.query(`update public.users set failed_pin_attempts = 0 where id = $1`, [owner2]);
+for (let i = 1; i <= 5; i++) {
+  res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222', code: wrongCode } });
+}
+check('wrong codes count toward the lock, even with the right password', res.status === 422 && (await owner2Attempts()) === 5
+  && (await one(`select locked_until > now() l from public.users where id = $1`, [owner2])).l, res);
+refused('locked: even the right code waits', await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222', code: totpNow(secret) } }), 422, 'Too many attempts');
+await db.query(`update public.users set locked_until = now() - interval '1 second' where id = $1`, [owner2]);
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner2, pin: '222222', code: totpNow(secret) } });
+check('password + code signs in, and says the code was checked', res.status === 200 && res.body.token && res.body.two_factor_checked === true, res);
+check('...and starts the count over', (await owner2Attempts()) === 0);
+const o2c = res.body.token;
+res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: cashier, pin: '1234' } });
+check('a cashier needs no code', res.status === 200 && res.body.two_factor_checked === false, res);
+
 res = await rpc(db, 'pos_void_request_create', { auth: U(o1), args: { sale_id: creditSaleId, reason: 'With 2FA' } });
 const vr2 = res.body.id;
 refused('approve here needs the code', await rpc(db, 'pos_void_approve_here', { auth: U(o1), args: { id: vr2, user_id: owner2, pin: '222222', code: null } }), 422, 'authenticator code');
+refused('approve here with a wrong code', await rpc(db, 'pos_void_approve_here', { auth: U(o1), args: { id: vr2, user_id: owner2, pin: '222222', code: wrongCode } }), 422, 'wrong or has expired');
+check('...counted', (await owner2Attempts()) === 1);
 res = await rpc(db, 'pos_void_approve_here', { auth: U(o1), args: { id: vr2, user_id: owner2, pin: '222222', code: totpNow(secret) } });
 check('approve here with password + code', res.status === 200 && res.body.status === 'approved', res);
 check('voided credit sale stops counting', (await rpc(db, 'pos_customers', { auth: U(o1), args: {} })).body.total_owed === -50);
-res = await rpc(db, 'pos_two_factor_disable', { auth: U(o1), args: { id: owner2 } });
+refused("2FA turned off only by its owner", await rpc(db, 'pos_two_factor_disable', { auth: U(o1), args: { id: owner2 } }), 422, 'Supabase');
+res = await rpc(db, 'pos_two_factor_disable', { auth: U(o2c), args: { id: owner2 } });
 check('2FA off', res.body.enabled === false && (await one(`select totp_secret from public.users where id = $1`, [owner2])).totp_secret === null);
+await db.query(`update public.users set totp_secret = $2, totp_enabled = true where id = $1`, [owner2, secret]);
+check('turn_off_two_factor for a lost phone', /is off for Owner Two/.test((await one(`select pos.turn_off_two_factor($1) as m`, [owner2])).m)
+  && (await one(`select totp_enabled from public.users where id = $1`, [owner2])).totp_enabled === false);
+check('...audited', (await ownerChanges(owner2)).at(-1) === 'two_factor_off');
 
 // TOTP and base32 in SQL agree with the JS used offline
 for (let i = 0; i < 25; i++) {
@@ -520,8 +619,9 @@ check('wrong passwords recorded with device and address', cashierFails.length ==
 check('the fifth wrong password records the lock, and so does a try while locked',
   cashierFails[4]?.details.attempt === 5 && cashierFails[4].details.locked === true && cashierFails[5]?.details.locked === true, cashierFails.map((f) => f.details));
 const owner2Fails = await failedFor(owner2);
-check('approve here: a wrong password and a missing code recorded',
-  owner2Fails.length === 2 && owner2Fails[0].details.step === 'password' && owner2Fails[1].details.step === 'code', owner2Fails.map((f) => f.details));
+check('wrong passwords and wrong codes recorded (the fifth code locks); a missing code only asks for it',
+  owner2Fails.map((f) => f.details.step).join() === 'password,password,code,code,code,code,code,password,code'
+  && owner2Fails[6].details.locked === true && owner2Fails[7].details.locked === true, owner2Fails.map((f) => f.details));
 const tillFail = { id: randomUUID(), terminal_id: 'term-1', actor_id: null, approver_id: null, action_type: 'failed_pin_attempt', entity_type: 'user', entity_id: owner1, details: { step: 'password', locked: false, checked: 'device' }, client_created_at: nowIso() };
 res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'audit_log', payload: tillFail }] } });
 check('a wrong password at an offline till arrives with sync, address stamped',
@@ -580,6 +680,32 @@ check('terminals get the erased record', res.body.customers.some((c) => c.id ===
   } catch (err) { code = err.code; }
   check('anon cannot erase customers', code === '42501', code);
 }
+
+// A sale from a till with its clock days ahead is dated when it arrived.
+const aheadId = randomUUID();
+res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [saleItem({ sale: aheadId, shift: null, lines: [{ ...cement, qty: 1 }], tendered: 500, when: new Date(Date.now() + 3 * 86400e3).toISOString() })] } });
+check('a sale dated days ahead is accepted', Object.values(res.body.results)[0]?.ok, res.body);
+check('...dated when it arrived, its stock movement too', (await one(`select s.client_created_at <= now() + interval '1 minute'
+  and (select bool_and(m.client_created_at <= now() + interval '1 minute') from public.stock_movements m where m.reference_id = s.id) as ok
+  from public.sales s where s.id = $1`, [aheadId])).ok);
+check('...and on the Audit log', (await one(`select count(*)::int n from public.audit_logs where action_type = 'timestamp_anomaly_clamped' and entity_type = 'sale' and entity_id = $1`, [aheadId])).n === 1);
+
+// Sold below the listed price: the app never does it, so the owners see it.
+const cheapId = randomUUID();
+const cheap = saleItem({ sale: cheapId, shift: null, lines: [{ ...cement, qty: 2 }], tendered: 1000 });
+cheap.payload.items[0].unit_price_snapshot = 100;
+cheap.payload.items[0].line_total = 200;
+cheap.payload.sale.total_amount = cheap.payload.sale.subtotal = cheap.payload.sale.amount_paid = 200;
+cheap.payload.sale.change_amount = 800;
+res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [cheap] } });
+const flagged = await one(`select details from public.audit_logs where action_type = 'price_override' and entity_id = $1`, [cheapId]);
+check('a sale below the listed price is on the Audit log', Object.values(res.body.results)[0]?.ok && flagged?.details.product_name === cement.product.name
+  && near(flagged.details.sold_at, 100) && near(flagged.details.listed_at, cement.product.unit_price), flagged);
+await rpc(db, 'pos_product_update', { auth: U(o1), args: { id: cement.product.id, unit_price: Number(cement.product.unit_price) + 20 } });
+const oldPriceId = randomUUID();
+res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [saleItem({ sale: oldPriceId, shift: null, lines: [{ ...cement, qty: 1 }], tendered: 500 })] } });
+check("a sale at the price before a change (the till hadn't heard yet) isn't flagged", Object.values(res.body.results)[0]?.ok
+  && (await one(`select count(*)::int n from public.audit_logs where action_type = 'price_override' and entity_id = $1`, [oldPriceId])).n === 0);
 
 // Sign-out
 ok('logout', await rpc(db, 'pos_logout', { auth: U(o1), args: {} }));

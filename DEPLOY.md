@@ -20,8 +20,9 @@ Set it up once, in this order.
    2. `supabase/migrations/20261015000001_pos_api.sql`: the server functions
    3. `supabase/migrations/20261016000000_security_controls.sql`: audit log
       additions
-   4. `supabase/seed.sql`: the 12 categories and 194 items
-   5. `supabase/starting-stock.sql` (optional): 100 of each item in the store,
+   4. `supabase/migrations/20261017000000_security_fixes.sql`: security fixes
+   5. `supabase/seed.sql`: the 12 categories and 194 items
+   6. `supabase/starting-stock.sql` (optional): 100 of each item in the store,
       like the local test setup. Skip it if you'll enter real counts on the
       Stock screen.
 3. Still in the SQL Editor, add the owners and register the first device:
@@ -33,7 +34,8 @@ Set it up once, in this order.
    ```
 
    `pos.add_terminal` shows the device's key **once**. Copy it for step 4.
-   Cashiers can be added later from the Staff screen.
+   Cashiers can be added later from the Staff screen; owner accounts only
+   here (see [Owner accounts](#owner-accounts)).
 4. Click **Connect** at the top of the project and copy the **Project URL**
    and the **publishable key** (`sb_publishable_...`). Every key is also listed
    under **Settings > API Keys**; on an older project the legacy `anon` key
@@ -64,6 +66,9 @@ In the repository on github.com:
    Then open **Actions → Nightly backup → Run workflow** once to check that
    it works. After that it runs by itself every night at about 02:15
    (GitHub sometimes starts it later). If a run fails, its page says why.
+
+   `SUPABASE_DB_URL` also lets the **Update the database** workflow bring the
+   database up to date by itself (see [Good to know](#good-to-know)).
 4. **Protection** (needs the repository owner's account):
    - **Settings > Branches**: add a rule for `main` that requires the **test**
      check to pass before merging.
@@ -91,6 +96,30 @@ select pos.add_terminal('Stockroom tablet');
 To retire a device, open **Table Editor > terminals** and set its
 `is_active` to `false`.
 
+To give a device a new key (say its key was seen by someone it shouldn't
+have been), make one with `pos.add_terminal`, then retire the old key as
+above. Within a few minutes the device asks for the new key (or straight away
+on **Sync now**); type it in. Nothing it made meanwhile is lost: sales stay on
+the device and go up once the new key is in.
+
+## Owner accounts
+
+Owner accounts are added, and their sign-in reset, only in the SQL Editor.
+In the app, one owner could otherwise make a second owner account (or take
+over the other owner's) and approve their own voids, which need two owners.
+Each of these is on the owners' **Audit log**:
+
+```sql
+select pos.add_staff('Maria Santos', 'owner', '123456');      -- a new owner
+select pos.reset_password('<staff id>', '654321');            -- a forgotten password
+select pos.set_role('<staff id>', 'owner', '123456');         -- make an owner (or 'cashier', with '1234')
+select pos.turn_off_two_factor('<staff id>');                 -- an owner lost the phone with their authenticator app
+```
+
+The staff id is in **Table Editor > users**. In the app, an owner adds and
+edits cashiers, and changes their own password and two-factor login. Two-factor
+codes are checked by the server, so a device never holds the secret.
+
 ## Running it on this computer
 
 Copy `caidic-pos-frontend/.env.example` to `caidic-pos-frontend/.env.local`,
@@ -111,13 +140,18 @@ uses the same Supabase project as the published site.
   activity. A store that opens daily won't hit this; if it happens, restore the
   project from the Supabase dashboard.
 - **Changing the server logic.** Edit
-  `supabase/migrations/20261015000001_pos_api.sql` and run it again in the SQL
-  Editor; every function in it is replaced in place. Table changes go in a new,
-  dated file in `supabase/migrations`. Run `npm test` in `tests/` first; the
-  checks run on a throwaway database, never the live one.
-- **Bringing an existing project up to date.** When a new dated file appears in
-  `supabase/migrations`, run it once in the SQL Editor, then run the API file
-  again.
+  `supabase/migrations/20261015000001_pos_api.sql`; every function in it is
+  replaced in place. Table changes go in a new, dated file in
+  `supabase/migrations`, written so it can run more than once. Run `npm test`
+  in `tests/` first; the checks run on a throwaway database, never the live
+  one.
+- **Bringing the database up to date.** A push to `main` that changes
+  `supabase/migrations` starts the **Update the database** workflow: it runs
+  the server tests, then the API file and the dated files after
+  `20261016000000_security_controls.sql`, in one transaction (all of it or
+  nothing). **Run workflow** on it does the same by hand. Without the
+  `SUPABASE_DB_URL` secret, run the same files in the SQL Editor instead, in
+  that order.
 - **The store's time zone** for "today" and "this week" is set in
   `pos.store_timezone()` (Asia/Manila).
 - **ISO standards.** What the system does for ISO/IEC 27001, 27017, 22301,

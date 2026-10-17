@@ -246,16 +246,28 @@ begin
   return extensions.crypt(p_pin, v_hash) = v_hash;
 end $$;
 
--- Checks a typed password. Five wrong in a row lock the account for a
--- minute, then the count starts over. Returns null when it's right, or the
+-- What an owner with two-factor login is told when only the password came.
+create or replace function pos.code_needed() returns text
+language sql immutable set search_path = '' as $$
+  select 'Enter the 6-digit authenticator code too.'::text
+$$;
+
+-- Checks a typed password and, for an owner with two-factor login on, the
+-- code from their authenticator app. The two-factor secret never leaves the
+-- server, so this is the only place a code is checked. Five wrong in a row,
+-- passwords and codes alike, lock the account for a minute, then the count
+-- starts over; only a full success resets it (a right password alone doesn't,
+-- or codes could be guessed forever). Returns null when it's right, or the
 -- message to show. Callers hand that message back instead of raising it, so
 -- the count of wrong tries, and the audit entry for each, are saved rather
 -- than rolled back.
 drop function if exists pos.check_pin(uuid, text);
-create or replace function pos.check_pin(p_user_id uuid, p_pin text, p_auth jsonb default '{}'::jsonb) returns text
+drop function if exists pos.check_pin(uuid, text, jsonb);
+create or replace function pos.check_pin(p_user_id uuid, p_pin text, p_auth jsonb default '{}'::jsonb, p_code text default null) returns text
 language plpgsql set search_path = '' as $$
 declare
   v_user public.users;
+  v_step text;
   v_attempts integer;
 begin
   select * into v_user from public.users u where u.id = p_user_id for update;
@@ -268,7 +280,19 @@ begin
             jsonb_build_object('step', 'password', 'locked', true, 'checked', 'server'), now());
     return 'Too many attempts — try again in a minute.';
   end if;
+
   if not pos.pin_matches(p_pin, v_user.pin_hash) then
+    v_step := 'password';
+  elsif v_user.role = 'owner' and v_user.totp_enabled then
+    if nullif(btrim(coalesce(p_code, '')), '') is null then
+      return pos.code_needed(); -- the password was right; nothing wrong yet
+    end if;
+    if not pos.totp_verify(v_user.totp_secret, p_code) then
+      v_step := 'code';
+    end if;
+  end if;
+
+  if v_step is not null then
     v_attempts := (case when v_user.locked_until is not null then 0 else v_user.failed_pin_attempts end) + 1;
     update public.users
     set failed_pin_attempts = v_attempts,
@@ -276,9 +300,11 @@ begin
     where id = v_user.id;
     insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
     values (coalesce(nullif(p_auth ->> 'terminal_id', ''), 'unknown'), 'failed_pin_attempt', 'user', v_user.id,
-            jsonb_build_object('step', 'password', 'attempt', v_attempts, 'locked', v_attempts >= 5, 'checked', 'server'), now());
-    return 'That password isn''t right — try again.';
+            jsonb_build_object('step', v_step, 'attempt', v_attempts, 'locked', v_attempts >= 5, 'checked', 'server'), now());
+    return case v_step when 'code' then 'That authenticator code is wrong or has expired.'
+                       else 'That password isn''t right — try again.' end;
   end if;
+
   if v_user.failed_pin_attempts > 0 or v_user.locked_until is not null then
     update public.users set failed_pin_attempts = 0, locked_until = null where id = v_user.id;
   end if;
@@ -730,6 +756,30 @@ begin
   then
     raise exception 'A stock movement doesn''t belong to this sale.';
   end if;
+
+  -- The stock taken has to be exactly what was sold, item by item, and only
+  -- from that item's own batches in the store. Otherwise a one-bag sale could
+  -- take eleven bags off the count, or another item's, and hide ten that
+  -- went missing. (The app always takes the quantity sold, oldest batch first;
+  -- a shortfall goes on the last batch, or on no batch at all.)
+  if exists (
+    select 1
+    from (select i ->> 'product_id' as product_id, sum((i ->> 'quantity')::numeric) as sold
+          from jsonb_array_elements(p_payload -> 'items') as i group by 1) l
+    full join (select m ->> 'product_id' as product_id, sum(-(m ->> 'delta')::numeric) as taken
+               from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) as m group by 1) t
+      using (product_id)
+    where abs(coalesce(l.sold, 0) - coalesce(t.taken, 0)) > 0.001
+  ) then
+    raise exception 'The stock taken doesn''t match what was sold.';
+  end if;
+  if exists (
+    select 1 from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) as m
+    join public.stock_batches b on b.id = pos.uuid_or_null(m ->> 'batch_id')
+    where b.product_id is distinct from pos.uuid_or_null(m ->> 'product_id') or b.location <> 'store'
+  ) then
+    raise exception 'A stock movement draws on another item''s stock, or the warehouse''s.';
+  end if;
 end $$;
 
 -- A completed sale is three things at once (the sale, its lines, and the
@@ -740,12 +790,32 @@ create or replace function pos.push_sale(p_payload jsonb) returns void
 language plpgsql set search_path = '' as $$
 declare
   v_sale jsonb := p_payload -> 'sale';
+  v_when timestamptz := (p_payload -> 'sale' ->> 'client_created_at')::timestamptz;
+  v_clamped boolean := false;
   v_item jsonb;
   v_move jsonb;
   v_batch_id uuid;
   v_left numeric;
+  v_low record;
 begin
   perform pos.check_sale(p_payload);
+
+  -- Sent again (the answer to the first try was lost): it was saved whole
+  -- then, lines and stock included. Anything more under its id would change
+  -- a sale already on the record, even a voided one, so nothing is added.
+  if exists (select 1 from public.sales s where s.id = (v_sale ->> 'id')::uuid) then
+    return;
+  end if;
+
+  -- A till with its clock far ahead would put the sale on a later day's
+  -- figures: it's dated when it arrived instead, and logged for the owners.
+  if v_when > now() + interval '6 hours' then
+    insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
+    values (coalesce(v_sale ->> 'terminal_id', 'unknown'), (v_sale ->> 'cashier_id')::uuid, 'timestamp_anomaly_clamped', 'sale',
+            (v_sale ->> 'id')::uuid, jsonb_build_object('claimed_at', v_sale ->> 'client_created_at', 'clamped_to', now()), now());
+    v_when := now();
+    v_clamped := true;
+  end if;
 
   insert into public.sales (id, terminal_id, cashier_id, shift_id, subtotal, discount_amount, tax_amount,
     total_amount, payment_method, amount_tendered, change_amount, amount_paid, payment_reference,
@@ -768,7 +838,7 @@ begin
     coalesce(v_sale ->> 'status', 'completed'),
     (v_sale ->> 'voided_by')::uuid,
     v_sale ->> 'void_reason',
-    (v_sale ->> 'client_created_at')::timestamptz)
+    v_when)
   on conflict (id) do nothing;
 
   for v_item in
@@ -808,7 +878,8 @@ begin
     values (
       (v_move ->> 'id')::uuid, (v_move ->> 'product_id')::uuid, v_batch_id, v_move ->> 'terminal_id',
       (v_move ->> 'delta')::numeric, coalesce(v_move ->> 'reason', 'sale'), (v_move ->> 'reference_id')::uuid,
-      (v_move ->> 'actor_id')::uuid, v_move ->> 'note', (v_move ->> 'client_created_at')::timestamptz);
+      (v_move ->> 'actor_id')::uuid, v_move ->> 'note',
+      case when v_clamped then v_when else (v_move ->> 'client_created_at')::timestamptz end);
 
     continue when v_batch_id is null;
 
@@ -822,9 +893,28 @@ begin
     if v_left < 0 then
       insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
       values (coalesce(v_sale ->> 'terminal_id', 'unknown'), (v_move ->> 'actor_id')::uuid, 'batch_oversold', 'stock_batch', v_batch_id,
-              jsonb_build_object('oversold_by', abs(v_left), 'movement_id', v_move ->> 'id'),
-              (v_move ->> 'client_created_at')::timestamptz);
+              jsonb_build_object('oversold_by', abs(v_left), 'movement_id', v_move ->> 'id'), v_when);
     end if;
+  end loop;
+
+  -- Sold for less than the item's price, and the price wasn't changed around
+  -- then (a till that hadn't heard of a new price yet): the app never does
+  -- this on its own, so it goes on the owners' Audit log.
+  for v_low in
+    select p.id, p.name, p.unit_price,
+           round((i ->> 'line_total')::numeric / nullif((i ->> 'quantity')::numeric, 0), 2) as sold_at
+    from jsonb_array_elements(p_payload -> 'items') as i
+    join public.products p on p.id = pos.uuid_or_null(i ->> 'product_id')
+    where (i ->> 'line_total')::numeric < p.unit_price * (i ->> 'quantity')::numeric - 0.01
+      and not exists (select 1 from public.activity_log a
+                      where a.event_type = 'price_changed' and a.entity_id = p.id
+                        and a.client_created_at >= v_when - interval '1 day')
+  loop
+    insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
+    values (coalesce(v_sale ->> 'terminal_id', 'unknown'), (v_sale ->> 'cashier_id')::uuid, 'price_override', 'sale',
+            (v_sale ->> 'id')::uuid,
+            jsonb_build_object('product_id', v_low.id, 'product_name', v_low.name, 'sold_at', v_low.sold_at, 'listed_at', v_low.unit_price),
+            v_when);
   end loop;
 end $$;
 
@@ -898,7 +988,8 @@ begin
     perform pos.push_stock_batch(p_payload);
 
   when 'shift_log' then
-    -- A late copy of a shift's start can't reopen a shift that already ended.
+    -- A shift stays as it was closed: a late copy of its start can't reopen
+    -- it, and a second "closed" can't rewrite its cash count afterwards.
     update public.shift_logs t set
       terminal_id = case when p_payload ? 'terminal_id' then p_payload ->> 'terminal_id' else t.terminal_id end,
       cashier_id = case when p_payload ? 'cashier_id' then (p_payload ->> 'cashier_id')::uuid else t.cashier_id end,
@@ -909,7 +1000,7 @@ begin
       counted_cash = case when p_payload ? 'counted_cash' then (p_payload ->> 'counted_cash')::numeric else t.counted_cash end,
       cash_discrepancy = case when p_payload ? 'cash_discrepancy' then (p_payload ->> 'cash_discrepancy')::numeric else t.cash_discrepancy end,
       status = case when p_payload ? 'status' then p_payload ->> 'status' else t.status end
-    where t.id = v_id and (t.status = 'open' or p_payload ->> 'status' = 'closed');
+    where t.id = v_id and t.status = 'open';
     if not found and not exists (select 1 from public.shift_logs t where t.id = v_id) then
       insert into public.shift_logs (id, terminal_id, cashier_id, started_at, ended_at, opening_cash,
         expected_cash, counted_cash, cash_discrepancy, status)
@@ -1001,7 +1092,22 @@ end $$;
 --   select pos.add_staff('Maria Santos', 'owner', '123456');
 --   select pos.add_terminal('Front counter');
 --   select pos.anonymize_customer('<customer id>');
+--   select pos.reset_password('<staff id>', '654321');     forgotten password
+--   select pos.set_role('<staff id>', 'owner', '123456');  with a new password
+--   select pos.turn_off_two_factor('<staff id>');          lost phone
+--
+-- Owner accounts are made and their sign-in reset only here. In the app, one
+-- owner could otherwise make or take over a second owner account and approve
+-- their own voids, which need two owners. Each change to an owner account is
+-- on the owners' Audit log.
 -- ===========================================================================
+
+create or replace function pos.audit_owner_change(p_terminal text, p_actor uuid, p_user uuid, p_change text, p_details jsonb default '{}'::jsonb) returns void
+language sql set search_path = '' as $$
+  insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
+  values (p_terminal, p_actor, 'owner_account_changed', 'user', p_user,
+          jsonb_build_object('change', p_change) || coalesce(p_details, '{}'::jsonb), now())
+$$;
 
 create or replace function pos.add_staff(p_full_name text, p_role text, p_pin text) returns uuid
 language plpgsql set search_path = '' as $$
@@ -1021,7 +1127,87 @@ begin
   insert into public.users (full_name, role, pin_hash)
   values (btrim(p_full_name), p_role, pos.hash_pin(p_pin))
   returning id into v_id;
+  if p_role = 'owner' then
+    perform pos.audit_owner_change('sql-editor', null, v_id, 'added');
+  end if;
   return v_id;
+end $$;
+
+-- A new password for anyone who forgot theirs. It also lifts a lock and
+-- signs them out of the server everywhere.
+create or replace function pos.reset_password(p_user uuid, p_pin text) returns text
+language plpgsql set search_path = '' as $$
+declare
+  v_user public.users;
+begin
+  select * into v_user from public.users u where u.id = p_user for update;
+  if not found then
+    raise exception 'No staff account has that id.';
+  end if;
+  if coalesce(p_pin, '') !~ '^[0-9]+$' then
+    raise exception 'The password is digits only.';
+  end if;
+  perform pos.assert_pin_length(p_pin, v_user.role);
+  update public.users set pin_hash = pos.hash_pin(p_pin), failed_pin_attempts = 0, locked_until = null where id = p_user;
+  delete from public.api_tokens t where t.user_id = p_user;
+  if v_user.role = 'owner' then
+    perform pos.audit_owner_change('sql-editor', null, p_user, 'password_reset');
+  end if;
+  return v_user.full_name || '''s password was changed.';
+end $$;
+
+-- Makes someone an owner or a cashier. The password length goes with the
+-- role (6 digits for owners, 4 for cashiers), so a new one comes with it.
+create or replace function pos.set_role(p_user uuid, p_role text, p_pin text) returns text
+language plpgsql set search_path = '' as $$
+declare
+  v_user public.users;
+begin
+  select * into v_user from public.users u where u.id = p_user for update;
+  if not found then
+    raise exception 'No staff account has that id.';
+  end if;
+  if p_role is null or p_role not in ('cashier', 'owner') then
+    raise exception 'The role is either cashier or owner.';
+  end if;
+  if coalesce(p_pin, '') !~ '^[0-9]+$' then
+    raise exception 'The password is digits only.';
+  end if;
+  perform pos.assert_pin_length(p_pin, p_role);
+  if v_user.role = 'owner' and p_role <> 'owner' and v_user.is_active
+     and (select count(*) from public.users u where u.role = 'owner' and u.is_active) <= 1 then
+    raise exception 'This is the only owner account, so it has to stay an owner. Add another owner first.';
+  end if;
+
+  update public.users
+  set role = p_role, pin_hash = pos.hash_pin(p_pin), failed_pin_attempts = 0, locked_until = null,
+      totp_secret = case when p_role = 'owner' then totp_secret end,
+      totp_enabled = p_role = 'owner' and totp_enabled
+  where id = p_user;
+  delete from public.api_tokens t where t.user_id = p_user;
+  if v_user.role = 'owner' or p_role = 'owner' then
+    perform pos.audit_owner_change('sql-editor', null, p_user, 'role', jsonb_build_object('from', v_user.role, 'to', p_role));
+  end if;
+  return v_user.full_name || ' is now ' || case when p_role = 'owner' then 'an owner' else 'a cashier' end || ', with the new password.';
+end $$;
+
+-- For an owner who lost the phone with their authenticator app. They can
+-- set it up again in the app, on Staff.
+create or replace function pos.turn_off_two_factor(p_user uuid) returns text
+language plpgsql set search_path = '' as $$
+declare
+  v_user public.users;
+begin
+  select * into v_user from public.users u where u.id = p_user for update;
+  if not found then
+    raise exception 'No staff account has that id.';
+  end if;
+  update public.users set totp_secret = null, totp_enabled = false where id = p_user;
+  delete from public.api_tokens t where t.user_id = p_user;
+  if v_user.role = 'owner' then
+    perform pos.audit_owner_change('sql-editor', null, p_user, 'two_factor_off');
+  end if;
+  return 'Two-factor login is off for ' || v_user.full_name || '. They can set it up again on Staff.';
 end $$;
 
 -- Removes a customer's name and phone number on their request (Data Privacy
@@ -1078,7 +1264,8 @@ $$;
 -- ---------------------------------------------------------------------------
 
 -- Everything a terminal keeps offline, changed since its last pull. Users
--- include pin_hash and totp_secret for offline sign-in; never cost_price.
+-- include pin_hash for offline sign-in, but never the two-factor secret (the
+-- server checks codes: pos.check_pin); products never cost_price.
 -- voided_sales lists sales voided since, so the terminal that made one stops
 -- counting it in its drawer. server_time is a minute early on purpose:
 -- something saved while this pull was reading arrives with the next one.
@@ -1094,7 +1281,7 @@ begin
     'server_time', now() - interval '1 minute',
     'products', (select coalesce(jsonb_agg(to_jsonb(p) - 'cost_price'), '[]'::jsonb) from public.products p where p.updated_at >= v_since),
     'categories', (select coalesce(jsonb_agg(to_jsonb(c)), '[]'::jsonb) from public.categories c where c.updated_at >= v_since),
-    'users', (select coalesce(jsonb_agg(to_jsonb(u)), '[]'::jsonb) from public.users u where u.updated_at >= v_since),
+    'users', (select coalesce(jsonb_agg(to_jsonb(u) - 'totp_secret'), '[]'::jsonb) from public.users u where u.updated_at >= v_since),
     'stock_batches', (select coalesce(jsonb_agg(to_jsonb(b)), '[]'::jsonb) from public.stock_batches b where b.updated_at >= v_since),
     'customers', (select coalesce(jsonb_agg(jsonb_build_object('id', c.id, 'name', c.name, 'phone', c.phone, 'is_active', c.is_active, 'updated_at', c.updated_at)), '[]'::jsonb)
                   from public.customers c where c.updated_at >= v_since),
@@ -1130,9 +1317,12 @@ begin
   return jsonb_build_object('results', v_results);
 end $$;
 
--- args: { user_id, pin }. Swaps a person's password for a server sign-in
+-- args: { user_id, pin, code? }. Swaps a person's password (and an owner's
+-- authenticator code, when they use two-factor login) for a server sign-in
 -- token, for the screens that read the server. The terminal signs people in
--- offline from its own copy; this is the same password, checked here.
+-- offline from its own copy; this is the same password, checked here, and
+-- the only place the code is checked. code_required says the password was
+-- right and the code is still missing; two_factor_checked that it was checked.
 create or replace function public.pos_login(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -1150,10 +1340,10 @@ begin
     perform pos.fail(422, 'That password isn''t right — try again.');
   end if;
 
-  v_problem := pos.check_pin(v_user.id, v_pin, auth);
+  v_problem := pos.check_pin(v_user.id, v_pin, auth, args ->> 'code');
   if v_problem is not null then
     perform set_config('response.status', '422', true);
-    return jsonb_build_object('message', v_problem);
+    return jsonb_build_object('message', v_problem, 'code_required', v_problem = pos.code_needed());
   end if;
 
   -- Sign-ins that ran out (see pos.require_user) are cleared as new ones are made.
@@ -1164,7 +1354,8 @@ begin
   insert into public.api_tokens (user_id, terminal_id, token_hash)
   values (v_user.id, coalesce(nullif(auth ->> 'terminal_id', ''), 'unknown'), pos.sha256_hex(v_token));
 
-  return jsonb_build_object('user', pos.user_json(v_user), 'token', v_token);
+  return jsonb_build_object('user', pos.user_json(v_user), 'token', v_token,
+    'two_factor_checked', v_user.role = 'owner' and v_user.totp_enabled);
 end $$;
 
 -- Ends this sign-in. Done at every sign-out, so the next person never
@@ -1809,7 +2000,7 @@ begin
     perform pos.fail(422, 'Only a completed sale can be voided.');
   end if;
   if (select count(*) from public.users u where u.role = 'owner' and u.is_active) < 2 then
-    perform pos.fail(422, 'A void needs two owners to approve it, and this store has only one owner account. Add the other owner in Staff first.');
+    perform pos.fail(422, 'A void needs two owners to approve it, and this store has only one owner account. Add the other owner in Supabase first (see DEPLOY.md).');
   end if;
 
   perform pos.expire_overdue_voids();
@@ -1858,18 +2049,12 @@ begin
     perform pos.fail(422, 'Choose an owner.');
   end if;
 
-  v_problem := pos.check_pin(v_owner.id, coalesce(args ->> 'pin', ''), auth);
+  -- The password and, with two-factor login on, the code: wrong ones of
+  -- either kind count toward the lock.
+  v_problem := pos.check_pin(v_owner.id, coalesce(args ->> 'pin', ''), auth, args ->> 'code');
   if v_problem is not null then
     perform set_config('response.status', '422', true);
     return jsonb_build_object('message', v_problem);
-  end if;
-
-  if v_owner.totp_enabled and not pos.totp_verify(v_owner.totp_secret, args ->> 'code') then
-    insert into public.audit_logs (terminal_id, action_type, entity_type, entity_id, details, client_created_at)
-    values (coalesce(nullif(auth ->> 'terminal_id', ''), 'unknown'), 'failed_pin_attempt', 'user', v_owner.id,
-            jsonb_build_object('step', 'code', 'checked', 'server'), now());
-    perform set_config('response.status', '422', true);
-    return jsonb_build_object('message', 'That authenticator code is wrong or has expired.');
   end if;
 
   return pos.approve_void_as(auth, pos.arg_uuid(args, 'id', 'Void request'), v_owner);
@@ -1976,7 +2161,8 @@ begin
           from public.users u where v_archived or u.is_active);
 end $$;
 
--- args: { full_name, role, pin }
+-- args: { full_name, role, pin }. Cashiers only: an owner account is added in
+-- Supabase (pos.add_staff), so no owner can make a second owner on their own.
 create or replace function public.pos_user_create(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -1992,6 +2178,9 @@ begin
   end if;
   if v_role is null or v_role not in ('cashier', 'owner') then
     perform pos.fail(422, 'Choose cashier or owner.');
+  end if;
+  if v_role = 'owner' then
+    perform pos.fail(422, 'Only cashier accounts are added here. An owner account is added in Supabase (see DEPLOY.md), so no owner can make a second owner on their own.');
   end if;
   if v_pin !~ '^[0-9]+$' then
     perform pos.fail(422, 'The password can only have digits.');
@@ -2011,6 +2200,10 @@ end $$;
 -- args: { id, full_name?, role?, pin?, is_active? }. Every change lands in
 -- the activity log (the password itself never does, only that it changed).
 -- The last active owner can't stop being one: nobody would be left to undo it.
+-- Roles, and another owner's password, are changed in Supabase instead
+-- (pos.set_role, pos.reset_password): otherwise one owner could make or take
+-- over a second owner account and approve their own voids. Deactivating or
+-- restoring an owner goes on the owners' Audit log.
 create or replace function public.pos_user_update(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -2021,6 +2214,7 @@ declare
   v_role text;
   v_pin text;
   v_active boolean;
+  v_was_active boolean;
 begin
   v_owner := pos.require_owner(auth);
   v_id := pos.arg_uuid(args, 'id', 'Staff account');
@@ -2054,21 +2248,36 @@ begin
      and (select count(*) from public.users u where u.role = 'owner' and u.is_active) <= 1 then
     perform pos.fail(422, 'This is the only owner account, so it has to stay an active owner. Add another owner first.');
   end if;
-  if v_pin is not null then
-    perform pos.assert_pin_length(v_pin, coalesce(v_role, v_user.role));
+  if v_role is not null and v_role <> v_user.role then
+    perform pos.fail(422, 'A role is changed in Supabase (see DEPLOY.md), so no owner can make a second owner on their own.');
   end if;
+  if v_pin is not null and v_user.role = 'owner' and v_user.id <> v_owner.id then
+    perform pos.fail(422, 'Only ' || v_user.full_name || ' can change their own password. If they forgot it, it''s reset in Supabase (see DEPLOY.md).');
+  end if;
+  if v_pin is not null then
+    perform pos.assert_pin_length(v_pin, v_user.role);
+  end if;
+  v_was_active := v_user.is_active;
 
   update public.users u set
     full_name = coalesce(v_name, u.full_name),
-    role = coalesce(v_role, u.role),
     pin_hash = case when v_pin is not null then pos.hash_pin(v_pin) else u.pin_hash end,
     is_active = coalesce(v_active, u.is_active)
   where u.id = v_user.id
   returning * into v_user;
 
+  -- A password someone else reset: whoever knew the old one is signed out.
+  if v_pin is not null and v_user.id <> v_owner.id then
+    delete from public.api_tokens t where t.user_id = v_user.id;
+  end if;
+
   if v_active is not null then
     if not v_active then
       delete from public.api_tokens t where t.user_id = v_user.id; -- signed out everywhere
+    end if;
+    if v_user.role = 'owner' and v_active is distinct from v_was_active then
+      perform pos.audit_owner_change(coalesce(nullif(auth ->> 'terminal_id', ''), 'unknown'), v_owner.id, v_user.id,
+        case when v_active then 'reactivated' else 'deactivated' end);
     end if;
     perform pos.record_activity(auth, v_owner.id, case when v_active then 'staff_reactivated' else 'staff_deactivated' end,
       'user', v_user.id, jsonb_build_object('staff_name', v_user.full_name));
@@ -2083,15 +2292,17 @@ end $$;
 -- args: { id }. Starts two-factor setup for an owner: a new secret, for the
 -- authenticator app (as a QR code or typed in). It isn't on until a code
 -- from the app is confirmed with pos_two_factor_verify; starting over just
--- replaces the secret.
+-- replaces the secret. Each owner does this for their own account only:
+-- starting it for someone else would switch theirs off.
 create or replace function public.pos_two_factor_setup(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
+  v_owner public.users;
   v_id uuid;
   v_user public.users;
   v_secret text;
 begin
-  perform pos.require_owner(auth);
+  v_owner := pos.require_owner(auth);
   v_id := pos.arg_uuid(args, 'id', 'Staff account');
   select * into v_user from public.users u where u.id = v_id;
   if not found then
@@ -2099,6 +2310,9 @@ begin
   end if;
   if v_user.role <> 'owner' then
     perform pos.fail(422, 'Two-factor login is only available for owner accounts.');
+  end if;
+  if v_user.id <> v_owner.id then
+    perform pos.fail(422, 'Only ' || v_user.full_name || ' can set up their own two-factor login, signed in as themselves.');
   end if;
 
   v_secret := pos.base32_encode(extensions.gen_random_bytes(20));
@@ -2126,6 +2340,9 @@ begin
   if not found then
     perform pos.fail(404, 'That staff account no longer exists.');
   end if;
+  if v_user.id <> v_owner.id then
+    perform pos.fail(422, 'Only ' || v_user.full_name || ' can set up their own two-factor login, signed in as themselves.');
+  end if;
   if v_user.totp_secret is null or not pos.totp_verify(v_user.totp_secret, args ->> 'code') then
     perform pos.fail(422, 'That code did not match. Try again.');
   end if;
@@ -2137,7 +2354,8 @@ begin
   return jsonb_build_object('enabled', true);
 end $$;
 
--- args: { id }
+-- args: { id }. Each owner turns off their own only; a lost phone is dealt
+-- with in Supabase (pos.turn_off_two_factor).
 create or replace function public.pos_two_factor_disable(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -2150,6 +2368,9 @@ begin
   select * into v_user from public.users u where u.id = v_id;
   if not found then
     perform pos.fail(404, 'That staff account no longer exists.');
+  end if;
+  if v_user.id <> v_owner.id then
+    perform pos.fail(422, 'Only ' || v_user.full_name || ' can turn off their own two-factor login. If they lost their phone, it''s turned off in Supabase (see DEPLOY.md).');
   end if;
 
   update public.users set totp_secret = null, totp_enabled = false where id = v_user.id;

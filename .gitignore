@@ -19,7 +19,7 @@ pos-backup-*
 
 # Android app packages and the key that signs them. The repository is public,
 # and anyone with the key could publish an "update" to the app.
-RRC POS - Google Play package/
+RRC POS - Google Play package*
 *.keystore
 *.jks
 *.apk
