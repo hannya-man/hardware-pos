@@ -149,19 +149,28 @@ try {
   tiles[5].click();
   await waitFor('two lines in the order', () => $('lines').querySelectorAll('.line').length === 2);
   check('a formula-like item name shows as plain text', $('lines').textContent.includes('=HYPERLINK('));
+  // On a phone the order is out of sight: the bar at the bottom counts it,
+  // and each item in it shows how many.
+  check('the order bar shows the count and the total', !$('cartBar').classList.contains('is-empty')
+    && $('cartBarCount').textContent === '2' && $('cartBarTotal').textContent === $('grandTotal').textContent, $('cartBar').textContent);
+  check('items in the order show how many', tiles[0].dataset.qty === '2' && tiles[5].dataset.qty === '1' && !('qty' in tiles[1].dataset));
+  $('cartBarOpen').click();
+  check('the order opens from the bar', $('viewBilling').classList.contains('order-open') && $('cartBarOpen').getAttribute('aria-expanded') === 'true');
   $('chargeBtn').click();
   await waitFor('checkout', () => !$('checkoutOverlay').hidden);
   type($('checkoutCash'), '5000');
   $('checkoutDoneBtn').click();
   await waitFor('the sale to reach the server', async () => (await one(`select count(*)::int n from public.sales`)).n === 1);
+  check('a finished sale empties the bar and closes the order', $('cartBar').classList.contains('is-empty')
+    && !$('viewBilling').classList.contains('order-open') && !$('grid').querySelector('[data-qty]'));
   check('cash sale: the tapped-twice item counted twice', (await one(`select max(quantity)::int most from public.sale_items`)).most === 2);
   check('the sale went to the pick lists', (await one(`select count(*)::int n from public.material_requests where sale_id is not null`)).n === 1);
 
   // A credit sale for a new customer, with nothing paid now.
   tiles[10].click();
   await waitFor('one line', () => $('lines').querySelectorAll('.line').length === 1);
-  $('chargeBtn').click();
-  await waitFor('checkout', () => !$('checkoutOverlay').hidden);
+  $('cartBarCharge').click(); // charged straight from the bar, without opening the order
+  await waitFor('checkout from the bar', () => !$('checkoutOverlay').hidden);
   $('payMethods').querySelector('[data-method="credit"]').click();
   type($('creditCustomerSearch'), 'Juan Dela Cruz');
   (await waitFor('the new-customer choice', () => $('creditCustomerResults').querySelector('[data-new-customer]'))).click();
@@ -169,8 +178,16 @@ try {
   $('checkoutDoneBtn').click();
   await waitFor('the credit sale on the server', async () => (await one(`select count(*)::int n from public.sales where payment_method = 'credit' and customer_id is not null`)).n === 1);
 
+  // The menu (on a phone it slides in from the top bar's button): picking a
+  // screen closes it, and so does Escape.
+  $('menuBtn').click();
+  check('the menu button opens the menu', $('appShell').classList.contains('nav-open') && $('menuBtn').getAttribute('aria-expanded') === 'true');
   // Pick lists: both sales are there; one is picked up.
   await openScreen('materialRequests');
+  check('picking a screen closes the menu', !$('appShell').classList.contains('nav-open') && $('menuBtn').getAttribute('aria-expanded') === 'false');
+  $('menuBtn').click();
+  doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  check('Escape closes the menu', !$('appShell').classList.contains('nav-open'));
   await waitFor('two pick lists', () => rows('materialRequestsTable').length === 2);
   rows('materialRequestsTable')[0].querySelector('[data-action="fulfill"]').click();
   await waitFor('a list marked picked up', async () => (await one(`select count(*)::int n from public.material_requests where status = 'fulfilled'`)).n === 1);

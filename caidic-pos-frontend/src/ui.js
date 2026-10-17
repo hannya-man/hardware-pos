@@ -68,6 +68,8 @@ const ICONS = {
   backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1Z"/><path d="m16 9-5 6M11 9l5 6"/>',
   check: '<path d="M20 6 9 17l-5-5"/>',
   alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
+  menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
+  up: '<path d="m6 15 6-6 6 6"/>',
 };
 
 export const icon = (name, cls = '') =>

@@ -336,9 +336,25 @@ function showView(key) {
 
 $('navItems').addEventListener('click', (e) => {
   const key = e.target.closest('[data-view]')?.dataset.view;
-  if (!key || key === activeView) return;
+  if (!key) return;
+  setMenu(false);
+  if (key === activeView) return;
   showView(key);
   log('view_opened', { entity_type: 'view', details: { view: key } });
+});
+
+// Phones: the menu slides in from the left, opened by the button at the top
+// (style.css keeps it in place on wider screens). Picking a screen, tapping
+// beside the menu, or Escape closes it.
+function setMenu(open) {
+  $('appShell').classList.toggle('nav-open', open);
+  $('menuBtn').setAttribute('aria-expanded', String(open));
+}
+
+$('menuBtn').addEventListener('click', () => setMenu(!$('appShell').classList.contains('nav-open')));
+$('navBackdrop').addEventListener('click', () => setMenu(false));
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && $('appShell').classList.contains('nav-open')) setMenu(false);
 });
 
 // ---------------------------------------------------------------------------
@@ -352,13 +368,17 @@ async function signOut() {
   await setSyncMeta('current_user_id', null);
   setSession(null, null);
   clearCart();
+  setMenu(false);
   activeView = null;
   $('appShell').hidden = true;
   $('loginScreen').hidden = false;
   await renderStaffGrid();
 }
 
-$('logoutBtn').addEventListener('click', () => openModal('signOutOverlay'));
+$('logoutBtn').addEventListener('click', () => {
+  setMenu(false);
+  openModal('signOutOverlay');
+});
 
 $('takeBreakBtn').addEventListener('click', async () => {
   closeModal('signOutOverlay');
