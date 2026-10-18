@@ -208,8 +208,31 @@ try {
   owing.querySelector('[data-action="pay"]').click();
   await waitFor('the payment form', () => !$('paymentOverlay').hidden);
   type($('paymentAmount'), '10');
+  check('a part payment shows what is still owed', $('paymentChangeLabel').textContent === 'Still owes', $('paymentChangeRow').textContent);
   $('paymentSaveBtn').click();
   await waitFor('the payment on the server', async () => (await one(`select count(*)::int n from public.credit_payments`)).n === 1);
+
+  // More than owed: cash pays off the balance and the rest is change; a
+  // GCash transfer can't be more than the balance.
+  const juanId = (await one(`select id from public.customers where name = 'Juan Dela Cruz'`)).id;
+  const stillOwed = Number((await one(`select pos.customer_owed($1) as o`, [juanId])).o);
+  const juanRow = await waitFor('the balance after the part payment', () => rows('creditTable').find((r) => r.textContent.includes('Juan Dela Cruz')
+    && r.textContent.includes(stillOwed.toLocaleString('en-PH', { minimumFractionDigits: 2 }))));
+  juanRow.querySelector('[data-action="pay"]').click();
+  await waitFor('the payment form', () => !$('paymentOverlay').hidden);
+  $('paymentMethod').querySelector('[data-method="gcash"]').click();
+  type($('paymentAmount'), String(stillOwed + 500));
+  check('GCash over the balance: by how much', $('paymentChangeLabel').textContent === 'More than owed by' && $('paymentChange').textContent === '₱500.00', $('paymentChangeRow').textContent);
+  $('paymentSaveBtn').click();
+  await waitFor('GCash over the balance refused', () => $('paymentStatus').textContent.includes("can't be more than"));
+  $('paymentMethod').querySelector('[data-method="cash"]').click();
+  check('cash over the balance: the change shows', $('paymentChangeLabel').textContent === 'Change' && $('paymentChange').textContent === '₱500.00', $('paymentChangeRow').textContent);
+  $('paymentSaveBtn').click();
+  await waitFor('the payment that pays it off', async () => (await one(`select count(*)::int n from public.credit_payments`)).n === 2);
+  const paidOff = await one(`select amount::float as amount, note from public.credit_payments order by created_at desc limit 1`);
+  check('...only what was owed is recorded, with the change noted', Math.abs(paidOff.amount - stillOwed) < 0.005 && paidOff.note.includes('change ₱500.00'), paidOff);
+  check('...the balance is paid off', Math.abs(Number((await one(`select pos.customer_owed($1) as o`, [juanId])).o)) < 0.005);
+  check('...and the change is said', toasts().includes('Change: ₱500.00'), toasts());
 
   // A screen still loading when its person signs out (a slow connection)
   // must not ask whoever comes next for that person's password.

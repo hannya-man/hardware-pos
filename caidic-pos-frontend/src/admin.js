@@ -341,7 +341,7 @@ function timelineEntries() {
     ...payments.map((p) => ({
       at: p.client_created_at, kind: 'payment',
       title: `Credit payment · ${peso(p.amount)} from ${p.customer?.name ?? 'a customer'}`,
-      sub: PAY_LABELS[p.payment_method] ?? p.payment_method,
+      sub: [PAY_LABELS[p.payment_method] ?? p.payment_method, p.note].filter(Boolean).join(' · '),
     })),
     ...activity
       .filter((a) => !SHOWN_FROM_RECORDS.has(a.event_type) && (showSteps || !STEP_EVENTS.has(a.event_type)))

@@ -40,7 +40,7 @@ const NAV = [
     { key: 'billing', label: 'Sell', icon: 'cart', roles: EVERYONE, render: renderBilling,
       help: 'Scan, search, or tap items to add them, then Charge. Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready.' },
     { key: 'credit', label: 'Credit (utang)', icon: 'wallet', roles: EVERYONE, render: renderCredit,
-      help: 'Customers who bought on credit and how much each one still owes. Record a payment when they pay.' },
+      help: 'Customers who bought on credit and how much each one still owes. Record a payment when they pay. If they hand over more cash than they owe, the balance is paid off and the change to give back is shown.' },
     { key: 'materialRequests', label: 'Pick lists', icon: 'clipboard', roles: EVERYONE, render: renderMaterialRequests,
       help: 'What the stockroom has to get ready. Every sale shows up here on its own, with the Ref no. from its slip. Tap Print for a pick slip to work from, and Mark picked up once the customer has the items. You can also send a list without charging, for a big order or a delivery.' },
   ] },
