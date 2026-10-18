@@ -91,7 +91,7 @@ function drawCustomer({ customer, sales, payments }) {
       html: `
         <div class="history-main">
           <strong>Paid ${esc(METHOD_LABELS[p.payment_method] ?? p.payment_method)}</strong>
-          <span class="muted">${fmtTime(p.client_created_at)} · received by ${esc(p.received_by?.full_name ?? '')}${p.reference ? ` · ${esc(p.reference)}` : ''}</span>
+          <span class="muted">${fmtTime(p.client_created_at)} · received by ${esc(p.received_by?.full_name ?? '')}${p.reference ? ` · ${esc(p.reference)}` : ''}${p.note ? ` · ${esc(p.note)}` : ''}</span>
         </div>
         <span class="history-amt text-ok">− ${peso(p.amount)}</span>`,
     })),
@@ -127,7 +127,7 @@ function openPayment(customer) {
   if (!customer) return;
   current = customer;
   $('paymentFor').textContent = `${customer.name} owes ${peso(customer.owed)}.`;
-  $('paymentAmount').value = ''; // typed in: what the customer actually paid, which may be part of it
+  $('paymentAmount').value = ''; // typed in: what the customer actually handed over
   $('paymentReference').value = '';
   setPayMethod('cash');
   setStatus('paymentStatus');
@@ -137,30 +137,70 @@ function openPayment(customer) {
 function setPayMethod(next) {
   payMethod = next;
   $('paymentMethod').querySelectorAll('[data-method]').forEach((b) => b.classList.toggle('active', b.dataset.method === next));
+  drawPaymentChange();
+}
+
+// What the amount received does to the balance. Cash can be more than what's
+// owed, like at checkout: the balance is paid off and the rest goes back as
+// change, so the payment recorded is never more than the balance. A GCash or
+// PayMaya transfer can't be: there's no cash at the counter to give back.
+function paymentSplit() {
+  const typed = $('paymentAmount').value.trim();
+  const received = round2(Number(typed) || 0);
+  const owed = round2(Math.max(0, Number(current?.owed) || 0));
+  return {
+    typed, received, owed,
+    paid: round2(Math.min(received, owed)),
+    change: round2(Math.max(0, received - owed)),
+    left: round2(Math.max(0, owed - received)),
+  };
+}
+
+function drawPaymentChange() {
+  if (!current) return;
+  const { typed, owed, change, left } = paymentSplit();
+  const [label, amount, tone] = !typed ? ['Owes', owed, 'is-empty']
+    : left > 0 ? ['Still owes', left, 'owe-row']
+    : change > 0 && payMethod !== 'cash' ? ['More than owed by', change, 'short']
+    : change > 0 ? ['Change', change, '']
+    : ['Paid in full', null, ''];
+  $('paymentChangeLabel').textContent = label;
+  $('paymentChange').textContent = amount == null ? '' : peso(amount);
+  $('paymentChangeRow').className = `change-row payment-change${tone ? ` ${tone}` : ''}`;
 }
 
 $('paymentMethod').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-method]');
   if (btn) setPayMethod(btn.dataset.method);
 });
-$('paymentAmount').addEventListener('input', (e) => keepDecimal(e.target));
+$('paymentAmount').addEventListener('input', (e) => {
+  keepDecimal(e.target);
+  drawPaymentChange();
+  setStatus('paymentStatus');
+});
 $('paymentAmount').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('paymentSaveBtn').click(); });
 
 $('paymentSaveBtn').addEventListener('click', async () => {
-  const amount = round2(Number($('paymentAmount').value));
-  if (!(amount > 0)) return setStatus('paymentStatus', 'Enter the amount paid.', 'err');
-  if (amount > round2(current.owed) + 0.004) return setStatus('paymentStatus', `That's more than the ${peso(current.owed)} owed.`, 'err');
+  const { received, owed, paid, change } = paymentSplit();
+  if (!(received > 0)) return setStatus('paymentStatus', 'Enter the amount received.', 'err');
+  if (!(paid > 0)) return setStatus('paymentStatus', 'This customer doesn\'t owe anything.', 'err');
+  if (change > 0 && payMethod !== 'cash') {
+    return setStatus('paymentStatus', `A GCash / PayMaya payment can't be more than the ${peso(owed)} owed. Enter ${peso(owed)}, and send the rest back.`, 'err');
+  }
 
   $('paymentSaveBtn').disabled = true;
   try {
     await recordCreditPayment({
-      customer_id: current.id, amount, payment_method: payMethod,
+      customer_id: current.id, amount: paid, payment_method: payMethod,
       reference: $('paymentReference').value.trim() || null,
+      note: change > 0 ? `Cash received ${peso(received)}, change ${peso(change)}` : null,
       received_by: session.user.id, shift_id: session.shiftId,
     });
     closeModal('paymentOverlay');
     closeModal('customerOverlay');
-    toast(`${peso(amount)} payment from ${current.name} saved.`);
+    toast(change > 0
+      ? `${peso(paid)} payment from ${current.name} saved: paid in full. Change: ${peso(change)}.`
+      : `${peso(paid)} payment from ${current.name} saved.`);
     await flushOutbox().catch(() => {}); // so the balance below already includes it
     await renderCredit();
   } catch (err) {

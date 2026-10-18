@@ -554,9 +554,10 @@
     <div class="modal-head"><h3 id="paymentTitle">Record a payment</h3></div>
     <p class="modal-sub" id="paymentFor"></p>
     <div class="field">
-      <label for="paymentAmount">Amount paid</label>
+      <label for="paymentAmount">Amount received</label>
       <div class="money-input"><span>₱</span><input id="paymentAmount" class="input input-lg" type="text" inputmode="decimal" autocomplete="off" placeholder="0.00" data-autofocus></div>
     </div>
+    <div class="change-row is-empty payment-change" id="paymentChangeRow"><span id="paymentChangeLabel">Owes</span><strong id="paymentChange"></strong></div>
     <div class="field">
       <span class="label">Paid with</span>
       <div class="segmented segmented-fill" id="paymentMethod">

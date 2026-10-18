@@ -625,6 +625,7 @@ input.input::-webkit-search-cancel-button {
 .change-row.short { background: var(--bad-soft); color: var(--bad); }
 .change-row.is-empty { background: var(--surface-3); color: var(--text-3); }
 .owe-row { background: var(--warn-soft); color: var(--warn); }
+.change-row.payment-change { margin: -6px 0 16px; }
 
 .qr { display: flex; justify-content: center; margin-bottom: 12px; }
 .qr img { padding: 8px; border: 1px solid var(--line); border-radius: var(--radius); background: #fff; }
