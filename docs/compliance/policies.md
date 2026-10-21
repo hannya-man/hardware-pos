@@ -56,6 +56,7 @@ site, the devices it runs on, and everyone who uses them.
 | Device keys, the database password, the backup passphrase | Credentials | Confidential | Owners (password manager) |
 | Staff passwords | Credentials | Confidential | Each person |
 | Audit log and shift downloads | Names, actions, addresses | Confidential | Owners |
+| Sales report downloads | Sales figures, best sellers, sales by staff | Confidential | Owners |
 | Pick slips, stock-out slips | Items and quantities | Internal | Staff |
 | Price list | Selling prices | Public | Staff |
 

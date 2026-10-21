@@ -12,7 +12,7 @@ Approved by: ______________________  Date: ____________
 | Selling at the counter (cash, GCash / PayMaya, credit) | 15 minutes | Works offline; a spare device within 15 minutes | None: each sale stays on its device until it syncs |
 | Taking credit payments | 1 day | Works offline | None, as above |
 | Pick lists to the stockroom | 1 hour | Works offline on the same device; between devices once online | None |
-| Owner screens (dashboard, stock, sales, staff, Audit log) | 2 days | 4 hours | Up to 24 hours (since the last nightly backup) |
+| Owner screens (dashboard, stock, sales, sales report, staff, Audit log) | 2 days | 4 hours | Up to 24 hours (since the last nightly backup) |
 | The central database | 1 day | 4 hours | Up to 24 hours |
 
 ## When something fails

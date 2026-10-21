@@ -12,7 +12,7 @@ import { session, withServerAuth } from './session.js';
 import { askToVoid, openVoidRequest } from './voids.js';
 import {
   $, esc, peso, qty, round2, fmtTime, fmtDate, fmtDateTime, humanize, badge, avatar, setStatus, showSelected, countTo,
-  tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast,
+  tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast, downloadCsv,
 } from './ui.js';
 
 const PAY_LABELS = { cash: 'Cash', gcash: 'GCash / PayMaya', bank: 'Bank transfer', credit: 'Credit', card: 'Card', other: 'Other' };
@@ -362,25 +362,6 @@ function drawTimeline() {
       <time>${clock(e.at)}</time>
       <div><strong>${esc(e.title)}</strong>${e.sub ? `<span>${esc(e.sub)}</span>` : ''}</div>
     </li>`).join('');
-}
-
-// A cell starting with = + - @ would run as a formula when opened in Excel or
-// Google Sheets (a customer named "=HYPERLINK(...)", say); a leading ' keeps
-// it plain text.
-const csvCell = (value) => {
-  const text = String(value ?? '');
-  return `"${(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text).replace(/"/g, '""')}"`;
-};
-
-// Saves rows (the first one is the header) as a CSV file.
-function downloadCsv(filename, rows) {
-  const link = document.createElement('a');
-  link.href = URL.createObjectURL(new Blob([rows.map((cells) => cells.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8;' }));
-  link.download = filename;
-  document.body.append(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 $('shiftDownloadBtn').addEventListener('click', () => {

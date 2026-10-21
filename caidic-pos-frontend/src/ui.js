@@ -70,6 +70,9 @@ const ICONS = {
   alert: '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4M12 17h.01"/>',
   menu: '<path d="M4 7h16M4 12h16M4 17h16"/>',
   up: '<path d="m6 15 6-6 6 6"/>',
+  prev: '<path d="m15 18-6-6 6-6"/>',
+  next: '<path d="m9 18 6-6-6-6"/>',
+  chart: '<path d="M3 3v18h18"/><path d="M8 17v-4M13 17V8M18 17v-7"/>',
 };
 
 export const icon = (name, cls = '') =>
@@ -220,6 +223,25 @@ export function printSlip({ title, facts, lines, checkLabel, signatures, note = 
   $('slipSignB').textContent = signatures[1];
   $('slipFoot').textContent = footer;
   printOnly('slipPrintArea');
+}
+
+// A cell starting with = + - @ would run as a formula when opened in Excel or
+// Google Sheets (a customer named "=HYPERLINK(...)", say); a leading ' keeps
+// it plain text.
+const csvCell = (value) => {
+  const text = String(value ?? '');
+  return `"${(/^[=+\-@\t\r]/.test(text) ? `'${text}` : text).replace(/"/g, '""')}"`;
+};
+
+// Saves rows (the first one is the header) as a CSV file.
+export function downloadCsv(filename, rows) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(new Blob([rows.map((cells) => cells.map(csvCell).join(',')).join('\r\n')], { type: 'text/csv;charset=utf-8;' }));
+  link.download = filename;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
 }
 
 // Prints one hidden section of the page (the slip, the price list) and nothing else.

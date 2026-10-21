@@ -270,6 +270,61 @@
         </div>
       </section>
 
+      <!-- Sales report: what sold and for how much, by day, week, month or year -->
+      <section id="viewReports" class="view stack" hidden>
+        <div class="page-toolbar report-bar">
+          <div class="segmented" id="reportPeriod">
+            <button type="button" data-period="day">Day</button>
+            <button type="button" data-period="week" class="active">Week</button>
+            <button type="button" data-period="month">Month</button>
+            <button type="button" data-period="year">Year</button>
+          </div>
+          <div class="report-nav">
+            <button type="button" class="icon-btn" id="reportPrev" aria-label="Previous week" title="Previous week"><span data-icon="prev"></span></button>
+            <div class="report-range" aria-live="polite"><strong id="reportRangeName">This week</strong><span id="reportRangeDates"></span></div>
+            <button type="button" class="icon-btn" id="reportNext" aria-label="Next week" title="Next week" disabled><span data-icon="next"></span></button>
+          </div>
+          <button type="button" class="btn btn-sm" id="reportDownloadBtn" aria-label="Download" disabled><span data-icon="download"></span><span class="btn-label">Download</span></button>
+        </div>
+        <p class="note note-warn report-error" id="reportError" hidden><span id="reportErrorText"></span><button type="button" class="btn btn-sm" id="reportRetryBtn">Try again</button></p>
+        <div class="stack report-body" id="reportBody">
+          <div class="kpi-grid">
+            <div class="card kpi"><span class="kpi-label">Total sales</span><span class="kpi-value" id="reportTotal">—</span><span class="kpi-sub" id="reportTotalSub"></span></div>
+            <div class="card kpi"><span class="kpi-label">Number of sales</span><span class="kpi-value" id="reportCount">—</span><span class="kpi-sub" id="reportCountSub"></span></div>
+            <div class="card kpi"><span class="kpi-label">Average sale</span><span class="kpi-value" id="reportAverage">—</span><span class="kpi-sub" id="reportAverageSub"></span></div>
+            <div class="card kpi"><span class="kpi-label">Credit collected</span><span class="kpi-value" id="reportCollected">—</span><span class="kpi-sub" id="reportCollectedSub"></span></div>
+          </div>
+          <p class="note" id="reportVoided" hidden></p>
+          <div class="card">
+            <div class="card-head"><h2 id="reportSeriesTitle">Sales by day</h2><button type="button" class="btn btn-sm btn-ghost" id="reportSeriesTable">Show as table</button></div>
+            <div class="chart" id="reportSeries"></div>
+          </div>
+          <div class="report-grid">
+            <div class="card">
+              <div class="card-head">
+                <h2>Best sellers</h2>
+                <div class="segmented" id="reportItemsBy">
+                  <button type="button" data-by="amount" class="active">Amount</button>
+                  <button type="button" data-by="quantity">Units</button>
+                </div>
+              </div>
+              <ol class="bar-list" id="reportItems"></ol>
+              <div class="list-more" hidden><button type="button" class="btn btn-sm" id="reportItemsMore">Show all</button></div>
+            </div>
+            <div class="stack">
+              <div class="card"><div class="card-head"><h2>How customers paid</h2></div><ul class="bar-list" id="reportPayment"></ul></div>
+              <div class="card"><div class="card-head"><h2>By category</h2></div><ul class="bar-list" id="reportCategories"></ul></div>
+              <div class="card"><div class="card-head"><h2>By staff</h2></div><ul class="bar-list" id="reportStaff"></ul></div>
+            </div>
+          </div>
+          <div class="card" id="reportHoursCard" hidden>
+            <div class="card-head"><h2>Busiest hours</h2><button type="button" class="btn btn-sm btn-ghost" id="reportHoursTable">Show as table</button></div>
+            <div class="chart" id="reportHours"></div>
+            <p class="chart-note">How many sales were made in each hour of the day, all the days above together.</p>
+          </div>
+        </div>
+      </section>
+
       <!-- Shifts -->
       <section id="viewShifts" class="view" hidden>
         <div class="card" id="shiftsListCard">

@@ -707,6 +707,61 @@ res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [saleItem({ sal
 check("a sale at the price before a change (the till hadn't heard yet) isn't flagged", Object.values(res.body.results)[0]?.ok
   && (await one(`select count(*)::int n from public.audit_logs where action_type = 'price_override' and entity_id = $1`, [oldPriceId])).n === 0);
 
+// The Sales report: every breakdown adds up to the same total, in the store's time zone.
+refused('the sales report is for owners', await rpc(db, 'pos_sales_report', { auth: U(cashierToken), args: { period: 'week' } }), 403);
+const weekStart = `(date_trunc('week', now() at time zone 'Asia/Manila') at time zone 'Asia/Manila')`;
+const weekSales = await one(`select coalesce(sum(total_amount), 0)::float as amount, count(*)::int as n from public.sales
+  where status = 'completed' and client_created_at >= ${weekStart} and client_created_at < ${weekStart} + interval '7 days'`);
+const sumOf = (rows) => rows.reduce((t, r) => t + Number(r.amount), 0);
+for (const [period, buckets] of [['day', 24], ['week', 7], ['month', null], ['year', 12]]) {
+  res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period } });
+  const r = res.body;
+  check(`sales report (${period}) answers`, res.status === 200 && r.period === period, res);
+  if (res.status !== 200) continue;
+  const total = Number(r.totals.amount);
+  check(`sales report (${period}): ${buckets ?? 'one per day of the month'} buckets`, buckets ? r.series.length === buckets : r.series.length >= 28 && r.series.length <= 31, r.series.length);
+  check(`sales report (${period}): over time, items, payment, categories, staff and hours all add up to the total`,
+    [r.series, r.items, r.payment, r.categories, r.staff, r.hours].every((rows) => near(sumOf(rows), total)) && r.hours.length === 24,
+    { total, series: sumOf(r.series), items: sumOf(r.items), payment: sumOf(r.payment), categories: sumOf(r.categories), staff: sumOf(r.staff), hours: sumOf(r.hours) });
+  check(`sales report (${period}): best sellers first`, r.items.every((x, i) => i === 0 || Number(r.items[i - 1].amount) >= Number(x.amount)), r.items.map((x) => x.amount));
+}
+res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week' } });
+const week = res.body;
+check('sales report: this week matches the sales on record, voided ones left out', near(week.totals.amount, weekSales.amount) && week.totals.count === weekSales.n
+  && week.totals.voided_count === (await one(`select count(*)::int n from public.sales where status = 'voided' and client_created_at >= ${weekStart}`)).n, { report: week.totals, weekSales });
+check('sales report: credit collected in the period', near(week.totals.credit_collected,
+  (await one(`select coalesce(sum(amount), 0)::float a from public.credit_payments where client_created_at >= ${weekStart}`)).a), week.totals);
+check("sales report: the store's time now, inside this week", week.now.slice(0, 10) >= week.first_day && week.now.slice(0, 10) <= week.last_day
+  && week.series.some((b) => b.at > week.now) === (week.now.slice(0, 10) < week.last_day), week.now);
+const firstDay = new Date(`${week.first_day}T00:00:00Z`);
+check('sales report: a week is Monday to Sunday', firstDay.getUTCDay() === 1 && (new Date(`${week.last_day}T00:00:00Z`) - firstDay) / 86400e3 === 6, [week.first_day, week.last_day]);
+const cementSold = week.items.find((x) => x.product_id === cement.product.id);
+check('sales report: an item with its units and money', cementSold && cementSold.unit === cement.product.unit
+  && near(cementSold.quantity, (await one(`select sum(i.quantity)::float q from public.sale_items i join public.sales s on s.id = i.sale_id
+    where i.product_id = $1 and s.status = 'completed' and s.client_created_at >= ${weekStart}`, [cement.product.id])).q), cementSold);
+res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', offset: 1 } });
+check('sales report: last week, with no sales, is empty but whole', res.status === 200 && res.body.totals.count === 0 && res.body.items.length === 0
+  && res.body.series.length === 7 && near(sumOf(res.body.series), 0), res.body.totals);
+check('sales report: this week compared with last', near(week.totals.previous_amount, res.body.totals.amount) && week.totals.previous_count === res.body.totals.count);
+// While this week is under way it's compared with last week up to this moment
+// a week ago; the rest of last week counts once this week is over. (Skipped
+// in the minutes either side of midnight on Sunday, when "a week ago" is
+// another week.)
+const intoWeek = Number((await one(`select extract(epoch from now() - ${weekStart}) as s`)).s);
+if (intoWeek > 300 && intoWeek < 7 * 86400 - 300) {
+  const weekAgo = (minutes) => new Date(Date.now() - 7 * 86400e3 + minutes * 60e3).toISOString();
+  res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [
+    saleItem({ sale: randomUUID(), shift: null, lines: [{ ...cement, qty: 1 }], tendered: 1000, when: weekAgo(-2) }),
+    saleItem({ sale: randomUUID(), shift: null, lines: [{ ...cement, qty: 2 }], tendered: 1000, when: weekAgo(2) }),
+  ] } });
+  const thisWeek = (await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week' } })).body.totals;
+  const lastWeek = (await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', offset: 1 } })).body.totals;
+  check('sales report: this week so far against last week up to the same moment', Object.values(res.body.results).every((r) => r.ok)
+    && thisWeek.previous_count === 1 && near(thisWeek.previous_amount, cement.product.unit_price) && lastWeek.count === 2, { thisWeek, lastWeek });
+}
+res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'year', offset: -3 } });
+check('sales report: a negative offset means this period', res.status === 200 && res.body.offset === 0, res.body.offset);
+
 // Sign-out
 ok('logout', await rpc(db, 'pos_logout', { auth: U(o1), args: {} }));
 refused('token gone after logout', await rpc(db, 'pos_users', { auth: U(o1), args: {} }), 401);
