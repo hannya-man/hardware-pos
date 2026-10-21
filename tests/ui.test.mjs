@@ -248,6 +248,15 @@ try {
   await answer('0'); // the owner's own shift starts with an empty drawer
   await waitFor('the dashboard', () => !$('viewDashboard').hidden && $('dashSales').textContent.includes('₱'));
   check('dashboard shows the cash sale', !$('dashSales').textContent.includes('₱0.00'), $('dashSales').textContent);
+  await waitFor("the dashboard's sales graph", () => $('dashTrend').querySelector('.chart-line, .chart-end'));
+  check("the dashboard's graph is today's, by the hour, beside yesterday", $('dashTrendTitle').textContent === 'Sales today, by the hour'
+    && $('dashTrend').querySelector('.chart-legend').textContent === 'TodayYesterday');
+  // Dark is the default; the menu switches this device to light and back
+  check('the screen starts dark', doc.documentElement.dataset.theme === 'dark' && $('themeBtn').textContent === 'Light screen');
+  $('themeBtn').click();
+  check('...and switches to light, remembered on this device', doc.documentElement.dataset.theme === 'light' && $('themeBtn').textContent === 'Dark screen'
+    && window.localStorage.getItem('rrc-theme') === 'light' && doc.querySelector('meta[name="theme-color"]').content === '#F5F4F2');
+  $('themeBtn').click();
   for (const screen of ['stock', 'sales', 'shifts', 'returns', 'staff', 'audit']) await openScreen(screen);
   await openScreen('stock');
   await waitFor('stock rows', () => rows('stockTable').length > 100);
@@ -324,16 +333,27 @@ try {
     && $('reportCount').textContent === week.n.toLocaleString('en-PH'), [$('reportTotal').textContent, $('reportCount').textContent, week]);
   check('sales report: the voided sale is noted apart', !$('reportVoided').hidden && $('reportVoided').textContent.includes('1 sale voided'), $('reportVoided').textContent);
   const daysSoFar = (await one(`select extract(isodow from now() at time zone 'Asia/Manila')::int as d`)).d; // Monday 1 .. Sunday 7
-  check('sales report: a column for each day of the week so far, and the busiest hours', $('reportSeries').querySelectorAll('.chart-col').length === daysSoFar
-    && !$('reportHoursCard').hidden && $('reportHours').querySelector('.chart-bar'), $('reportSeries').querySelectorAll('.chart-col').length);
-  const todayCol = [...$('reportSeries').querySelectorAll('.chart-col')].find((g) => g.querySelector('.chart-bar'));
-  todayCol.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  check('sales report: sales over time beside last week, with its legend', $('reportSeries').querySelector('.chart-line, .chart-end')
+    && $('reportSeries').querySelector('.chart-legend').textContent === 'This weekLast week', $('reportSeries').innerHTML.slice(0, 200));
+  // The keyboard (or a finger) on the graph: the crosshair lands on today, with today's sales
+  $('reportSeries').querySelector('.chart-hit-area').dispatchEvent(new window.FocusEvent('focus'));
   const tip = $('reportSeries').querySelector('.chart-tip');
-  check('sales report: a tapped column says its amount', !tip.hidden && tip.querySelector('strong').textContent === pesoText(week.amount), tip.textContent);
+  check("sales report: the crosshair's tooltip gives today's sales", !tip.hidden && tip.querySelector('.chart-tip-row strong').textContent === pesoText(week.amount)
+    && $('reportSeries').classList.contains('is-pointing'), tip.textContent);
   $('reportSeriesTable').click();
-  check('sales report: the chart as a table, without the days still to come', $('reportSeries').querySelectorAll('.mini-table tbody tr').length === daysSoFar
-    && $('reportSeriesTable').textContent === 'Show as chart');
+  const tableRows = [...$('reportSeries').querySelectorAll('.mini-table tbody tr')];
+  check('sales report: the graph as a table, the days still to come marked', tableRows.length === 7
+    && tableRows.filter((tr) => tr.children[1].textContent === '—').length === 7 - daysSoFar && $('reportSeriesTable').textContent === 'Show as chart',
+  tableRows.map((tr) => tr.textContent));
   $('reportSeriesTable').click();
+  const cash = await one(`select coalesce(sum(total_amount), 0)::float as amount from public.sales where status = 'completed' and payment_method = 'cash' and ${since('week')}`);
+  const cashRow = [...$('reportPayment').querySelectorAll('.donut-legend li')].find((li) => li.textContent.includes('Cash'));
+  check('sales report: how customers paid, as a donut with its legend', $('reportPayment').querySelectorAll('.donut-seg').length >= 2
+    && cashRow?.querySelector('.donut-amount').textContent === pesoText(cash.amount) && $('reportPayment').querySelector('.donut-value').textContent === pesoText(week.amount),
+  cashRow?.textContent);
+  const heatSales = [...$('reportHours').querySelectorAll('.heat-cell:not(.heat-0)')];
+  check('sales report: the busiest days and hours, as a heatmap', !$('reportHoursCard').hidden && $('reportHours').querySelectorAll('.heat-cell').length % 7 === 0
+    && heatSales.length >= 1 && heatSales.some((c) => c.classList.contains('heat-5')), heatSales.length);
   $('reportItemsBy').querySelector('[data-by="quantity"]').click();
   const top = await one(`select coalesce(p.name, max(i.name_snapshot)) as name, sum(i.quantity)::float as q from public.sale_items i
     join public.sales s on s.id = i.sale_id left join public.products p on p.id = i.product_id

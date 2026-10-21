@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#F5F4F2">
+<meta name="theme-color" content="#08080A">
 <title>RRC Merchandise POS</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <!-- Installable as an app: Android's "Install app", iPhone's "Add to Home Screen" -->
@@ -53,6 +53,7 @@
         <span class="avatar" id="sideAv"></span>
         <div class="user-meta"><div class="user-name" id="sideName"></div><div class="user-role" id="sideShift"></div></div>
       </div>
+      <button type="button" id="themeBtn" class="btn btn-ghost btn-block"></button>
       <button type="button" id="logoutBtn" class="btn btn-ghost btn-block" title="Sign out"><span data-icon="logout"></span><span class="nav-label">Sign out</span></button>
     </div>
   </aside>
@@ -102,6 +103,10 @@
           <div class="card kpi"><span class="kpi-label">Customers owe you</span><span class="kpi-value" id="dashOwed">—</span><span class="kpi-sub">unpaid credit (utang)</span></div>
           <div class="card kpi"><span class="kpi-label">Stock value</span><span class="kpi-value" id="dashStock">—</span><span class="kpi-sub" id="dashStockSub"></span></div>
           <div class="card kpi" id="dashLowCard"><span class="kpi-label">Low stock</span><span class="kpi-value" id="dashLow">—</span><span class="kpi-sub">items to reorder</span></div>
+        </div>
+        <div class="card dash-trend">
+          <div class="card-head"><h2 id="dashTrendTitle">Sales today</h2><button type="button" class="btn btn-sm btn-ghost" id="dashReportBtn">Sales report<span data-icon="next"></span></button></div>
+          <div class="chart" id="dashTrend"></div>
         </div>
         <div class="grid-3">
           <div class="card">
@@ -312,15 +317,15 @@
               <div class="list-more" hidden><button type="button" class="btn btn-sm" id="reportItemsMore">Show all</button></div>
             </div>
             <div class="stack">
-              <div class="card"><div class="card-head"><h2>How customers paid</h2></div><ul class="bar-list" id="reportPayment"></ul></div>
+              <div class="card"><div class="card-head"><h2>How customers paid</h2></div><div class="chart" id="reportPayment"></div></div>
               <div class="card"><div class="card-head"><h2>By category</h2></div><ul class="bar-list" id="reportCategories"></ul></div>
               <div class="card"><div class="card-head"><h2>By staff</h2></div><ul class="bar-list" id="reportStaff"></ul></div>
             </div>
           </div>
           <div class="card" id="reportHoursCard" hidden>
-            <div class="card-head"><h2>Busiest hours</h2><button type="button" class="btn btn-sm btn-ghost" id="reportHoursTable">Show as table</button></div>
+            <div class="card-head"><h2>Busiest times</h2><button type="button" class="btn btn-sm btn-ghost" id="reportHoursTable">Show as table</button></div>
             <div class="chart" id="reportHours"></div>
-            <p class="chart-note">How many sales were made in each hour of the day, all the days above together.</p>
+            <p class="chart-note" id="reportHoursNote"></p>
           </div>
         </div>
       </section>

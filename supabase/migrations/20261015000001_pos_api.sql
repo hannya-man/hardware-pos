@@ -1809,9 +1809,10 @@ end $$;
 -- args: { period: day | week | month | year, offset? }. The Sales report for
 -- one period in the store's time zone (offset 0 is the current one, 1 the one
 -- before, ...): totals against the period before (up to the same moment,
--- for the one under way), sales over time (by hour,
+-- for the one under way), sales over time beside the period before (by hour,
 -- day or month), every item sold (most money first), and the split by
--- payment, category, staff and hour of the day. Completed sales only; voided
+-- payment, category, staff, hour of the day, and day of the week by hour
+-- (heat). Completed sales only; voided
 -- ones are counted apart. Times in series (and now) are the store's local time.
 create or replace function public.pos_sales_report(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
@@ -1873,6 +1874,14 @@ begin
                  from generate_series(v_local, v_local + v_step - ('1 ' || v_bucket)::interval, ('1 ' || v_bucket)::interval) as b(at)
                  left join (select date_trunc(v_bucket, s.local_at) as at, sum(s.total_amount) as amount, count(*) as n
                             from sold s group by 1) x on x.at = b.at),
+      -- The whole period before, bucket by bucket, to draw beside it.
+      'previous_series', (select jsonb_agg(jsonb_build_object('at', to_char(b.at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+                                                              'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by b.at)
+                          from generate_series(v_local - v_step, v_local - ('1 ' || v_bucket)::interval, ('1 ' || v_bucket)::interval) as b(at)
+                          left join (select date_trunc(v_bucket, s.client_created_at at time zone v_tz) as at, sum(s.total_amount) as amount, count(*) as n
+                                     from public.sales s
+                                     where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_start
+                                     group by 1) x on x.at = b.at),
       'items', (select coalesce(jsonb_agg(jsonb_build_object('product_id', x.product_id, 'name', coalesce(p.name, x.name), 'unit', p.unit,
                                                              'quantity', x.quantity, 'amount', x.amount, 'sales', x.sales)
                                           order by x.amount desc, coalesce(p.name, x.name)), '[]'::jsonb)
@@ -1895,7 +1904,12 @@ begin
       'hours', (select jsonb_agg(jsonb_build_object('hour', h.h, 'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by h.h)
                 from generate_series(0, 23) as h(h)
                 left join (select extract(hour from s.local_at)::integer as hr, sum(s.total_amount) as amount, count(*) as n
-                           from sold s group by 1) x on x.hr = h.h)));
+                           from sold s group by 1) x on x.hr = h.h),
+      -- Day of the week (1 Monday .. 7 Sunday) by hour, only where something sold.
+      'heat', (select coalesce(jsonb_agg(jsonb_build_object('day', x.d, 'hour', x.h, 'amount', x.amount, 'count', x.n) order by x.d, x.h), '[]'::jsonb)
+               from (select extract(isodow from s.local_at)::integer as d, extract(hour from s.local_at)::integer as h,
+                            sum(s.total_amount) as amount, count(*) as n
+                     from sold s group by 1, 2) x)));
 end $$;
 
 -- args: { cashier_id?, page? }. Newest first, with what each one sold.

@@ -724,6 +724,10 @@ for (const [period, buckets] of [['day', 24], ['week', 7], ['month', null], ['ye
     [r.series, r.items, r.payment, r.categories, r.staff, r.hours].every((rows) => near(sumOf(rows), total)) && r.hours.length === 24,
     { total, series: sumOf(r.series), items: sumOf(r.items), payment: sumOf(r.payment), categories: sumOf(r.categories), staff: sumOf(r.staff), hours: sumOf(r.hours) });
   check(`sales report (${period}): best sellers first`, r.items.every((x, i) => i === 0 || Number(r.items[i - 1].amount) >= Number(x.amount)), r.items.map((x) => x.amount));
+  check(`sales report (${period}): the day-of-week by hour grid adds up too`, near(sumOf(r.heat), total) && r.heat.every((c) => c.day >= 1 && c.day <= 7 && c.hour >= 0 && c.hour <= 23 && c.count > 0),
+    r.heat.slice(0, 3));
+  check(`sales report (${period}): the period before, bucket by bucket`, r.previous_series.length >= (period === 'month' ? 28 : r.series.length)
+    && r.previous_series.every((b) => b.at < r.series[0].at) && r.previous_series[0].at.slice(11) === r.series[0].at.slice(11), [r.previous_series.length, r.previous_series[0]?.at]);
 }
 res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week' } });
 const week = res.body;
@@ -758,6 +762,9 @@ if (intoWeek > 300 && intoWeek < 7 * 86400 - 300) {
   const lastWeek = (await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', offset: 1 } })).body.totals;
   check('sales report: this week so far against last week up to the same moment', Object.values(res.body.results).every((r) => r.ok)
     && thisWeek.previous_count === 1 && near(thisWeek.previous_amount, cement.product.unit_price) && lastWeek.count === 2, { thisWeek, lastWeek });
+  const weekNow = (await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week' } })).body;
+  check("sales report: last week's line has all of last week", weekNow.previous_series.reduce((t, b) => t + b.count, 0) === 2
+    && near(weekNow.previous_series.reduce((t, b) => t + Number(b.amount), 0), 3 * cement.product.unit_price), weekNow.previous_series);
 }
 res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'year', offset: -3 } });
 check('sales report: a negative offset means this period', res.status === 200 && res.body.offset === 0, res.body.offset);
