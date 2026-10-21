@@ -1806,14 +1806,17 @@ begin
   return pos.page_json(v_rows, v_total, v_page, 100) || jsonb_build_object('totals', v_totals);
 end $$;
 
--- args: { period: day | week | month | year, offset? }. The Sales report for
--- one period in the store's time zone (offset 0 is the current one, 1 the one
--- before, ...): totals against the period before (up to the same moment,
--- for the one under way), sales over time beside the period before (by hour,
--- day or month), every item sold (most money first), and the split by
--- payment, category, staff, hour of the day, and day of the week by hour
--- (heat). Completed sales only; voided
--- ones are counted apart. Times in series (and now) are the store's local time.
+-- args: { period: day | week | month | year, offset?, cashier_id? }. The
+-- Sales report for one period in the store's time zone (offset 0 is the
+-- current one, 1 the one before, ...): totals against the period before (up
+-- to the same moment, for the one under way), sales over time beside the
+-- period before (by hour, day or month), every item sold with its SKU (most
+-- money first), and the split by payment, category, staff, hour of the day,
+-- and day of the week by hour (heat). With cashier_id, all of it is that
+-- person's sales only (what they sold), except staff, which is always
+-- everyone (with each person's top items) so another can be picked; people
+-- lists who can be. Completed sales only; voided ones are counted apart.
+-- Times in series (and now) are the store's local time.
 create or replace function public.pos_sales_report(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
 declare
@@ -1827,8 +1830,10 @@ declare
   v_end timestamptz;
   v_before timestamptz;
   v_before_end timestamptz;
+  v_cashier uuid;
 begin
   perform pos.require_owner(auth);
+  v_cashier := pos.arg_uuid(args, 'cashier_id', 'Staff');
   v_offset := least(greatest(coalesce(pos.arg_number(args, 'offset', 'offset')::integer, 0), 0), 5000);
   v_step := ('1 ' || v_unit)::interval;
   v_local := date_trunc(v_unit, now() at time zone v_tz) - v_offset * v_step;
@@ -1840,13 +1845,15 @@ begin
   v_before_end := least(v_start, v_before + (now() - v_start));
 
   return (
-    with sold as (
+    with everyone as (
       select s.id, s.total_amount, s.payment_method, s.amount_paid, s.cashier_id,
              s.client_created_at at time zone v_tz as local_at
       from public.sales s
       where s.status = 'completed' and s.client_created_at >= v_start and s.client_created_at < v_end
+    ), sold as (
+      select * from everyone e where v_cashier is null or e.cashier_id = v_cashier
     ), lines as (
-      select i.product_id, i.name_snapshot, i.quantity, i.line_total, i.sale_id
+      select i.product_id, i.name_snapshot, i.sku_snapshot, i.quantity, i.line_total, i.sale_id
       from public.sale_items i join sold s on s.id = i.sale_id
     )
     select jsonb_build_object(
@@ -1855,20 +1862,29 @@ begin
       'first_day', to_char(v_local, 'YYYY-MM-DD'),
       'last_day', to_char(v_local + v_step - interval '1 day', 'YYYY-MM-DD'),
       'now', to_char(now() at time zone v_tz, 'YYYY-MM-DD"T"HH24:MI:SS'),
+      'cashier', (select jsonb_build_object('id', u.id, 'full_name', u.full_name, 'role', u.role) from public.users u where u.id = v_cashier),
+      'people', (select coalesce(jsonb_agg(jsonb_build_object('id', u.id, 'full_name', u.full_name, 'role', u.role) order by u.role, u.full_name), '[]'::jsonb)
+                 from public.users u
+                 where u.is_active or u.id = v_cashier or exists (select 1 from everyone e where e.cashier_id = u.id)),
       'totals', jsonb_build_object(
         'amount', (select coalesce(sum(s.total_amount), 0) from sold s),
         'count', (select count(*) from sold),
         'previous_amount', (select coalesce(sum(s.total_amount), 0) from public.sales s
-                            where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end),
+                            where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end
+                              and (v_cashier is null or s.cashier_id = v_cashier)),
         'previous_count', (select count(*) from public.sales s
-                           where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end),
+                           where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end
+                             and (v_cashier is null or s.cashier_id = v_cashier)),
         'credit_given', (select coalesce(sum(s.total_amount - coalesce(s.amount_paid, 0)), 0) from sold s where s.payment_method = 'credit'),
         'credit_collected', (select coalesce(sum(p.amount), 0) from public.credit_payments p
-                             where p.client_created_at >= v_start and p.client_created_at < v_end),
+                             where p.client_created_at >= v_start and p.client_created_at < v_end
+                               and (v_cashier is null or p.received_by = v_cashier)),
         'voided_count', (select count(*) from public.sales s
-                         where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end),
+                         where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end
+                           and (v_cashier is null or s.cashier_id = v_cashier)),
         'voided_amount', (select coalesce(sum(s.total_amount), 0) from public.sales s
-                          where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end)),
+                          where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end
+                            and (v_cashier is null or s.cashier_id = v_cashier))),
       'series', (select jsonb_agg(jsonb_build_object('at', to_char(b.at, 'YYYY-MM-DD"T"HH24:MI:SS'),
                                                      'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by b.at)
                  from generate_series(v_local, v_local + v_step - ('1 ' || v_bucket)::interval, ('1 ' || v_bucket)::interval) as b(at)
@@ -1881,11 +1897,12 @@ begin
                           left join (select date_trunc(v_bucket, s.client_created_at at time zone v_tz) as at, sum(s.total_amount) as amount, count(*) as n
                                      from public.sales s
                                      where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_start
+                                       and (v_cashier is null or s.cashier_id = v_cashier)
                                      group by 1) x on x.at = b.at),
-      'items', (select coalesce(jsonb_agg(jsonb_build_object('product_id', x.product_id, 'name', coalesce(p.name, x.name), 'unit', p.unit,
-                                                             'quantity', x.quantity, 'amount', x.amount, 'sales', x.sales)
+      'items', (select coalesce(jsonb_agg(jsonb_build_object('product_id', x.product_id, 'sku', coalesce(p.sku, x.sku), 'name', coalesce(p.name, x.name),
+                                                             'unit', p.unit, 'quantity', x.quantity, 'amount', x.amount, 'sales', x.sales)
                                           order by x.amount desc, coalesce(p.name, x.name)), '[]'::jsonb)
-                from (select l.product_id, max(l.name_snapshot) as name, sum(l.quantity) as quantity,
+                from (select l.product_id, max(l.name_snapshot) as name, max(l.sku_snapshot) as sku, sum(l.quantity) as quantity,
                              sum(l.line_total) as amount, count(distinct l.sale_id) as sales
                       from lines l group by l.product_id) x
                 left join public.products p on p.id = x.product_id),
@@ -1897,9 +1914,18 @@ begin
                      from (select p.category_id, sum(l.line_total) as amount
                            from lines l left join public.products p on p.id = l.product_id group by 1) x
                      left join public.categories c on c.id = x.category_id),
-      'staff', (select coalesce(jsonb_agg(jsonb_build_object('name', coalesce(u.full_name, 'Unknown'), 'amount', x.amount, 'count', x.n)
-                                          order by x.amount desc), '[]'::jsonb)
-                from (select s.cashier_id, sum(s.total_amount) as amount, count(*) as n from sold s group by 1) x
+      'staff', (select coalesce(jsonb_agg(jsonb_build_object(
+                    'id', x.cashier_id, 'name', coalesce(u.full_name, 'Unknown'), 'role', u.role, 'amount', x.amount, 'count', x.n,
+                    'top_items', (select coalesce(jsonb_agg(jsonb_build_object('name', t.name, 'unit', t.unit, 'quantity', t.quantity, 'amount', t.amount)
+                                                            order by t.amount desc, t.name), '[]'::jsonb)
+                                  from (select coalesce(p.name, max(i.name_snapshot)) as name, p.unit, sum(i.quantity) as quantity, sum(i.line_total) as amount
+                                        from public.sale_items i join everyone e on e.id = i.sale_id
+                                        left join public.products p on p.id = i.product_id
+                                        where e.cashier_id = x.cashier_id
+                                        group by i.product_id, p.name, p.unit
+                                        order by sum(i.line_total) desc limit 5) t))
+                  order by x.amount desc), '[]'::jsonb)
+                from (select e.cashier_id, sum(e.total_amount) as amount, count(*) as n from everyone e group by 1) x
                 left join public.users u on u.id = x.cashier_id),
       'hours', (select jsonb_agg(jsonb_build_object('hour', h.h, 'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by h.h)
                 from generate_series(0, 23) as h(h)
@@ -2529,6 +2555,78 @@ begin
   into v_total, v_rows;
 
   return pos.page_json(v_rows, v_total, v_page, 200);
+end $$;
+
+-- args: { user_id?, from?, to?, steps?, page? }. Everything people did, for
+-- the Audit log's "Everyone's activity": sign-ins, breaks and shifts, sales,
+-- credit payments, voids, returns, deliveries, price and stock changes,
+-- staff changes, pick lists. Newest first, with who did it, from which
+-- internet address, and what it was about. The small steps (screens opened,
+-- items added to an order, scans) only with steps: true. Also, for the same
+-- period: each person's totals (whatever user_id is), and how many events
+-- need a look.
+create or replace function public.pos_activity(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
+declare
+  v_user uuid;
+  v_from timestamptz;
+  v_to timestamptz;
+  v_steps boolean := (args ->> 'steps') = 'true';
+  v_page integer;
+  v_total bigint;
+  v_rows jsonb;
+begin
+  perform pos.require_owner(auth);
+  v_user := pos.arg_uuid(args, 'user_id', 'Staff');
+  v_from := pos.arg_time(args, 'from', 'From');
+  v_to := pos.arg_time(args, 'to', 'To');
+  v_page := greatest(1, coalesce(pos.arg_number(args, 'page', 'page')::integer, 1));
+
+  with found as (
+    select a from public.activity_log a
+    where (v_user is null or a.actor_id = v_user)
+      and (v_from is null or a.client_created_at >= v_from)
+      and (v_to is null or a.client_created_at <= v_to)
+      and (v_steps or a.event_type not in ('view_opened', 'item_added', 'barcode_scanned'))
+  ), page as (
+    select f.a from found f
+    order by (f.a).client_created_at desc
+    limit 200 offset (v_page - 1) * 200
+  )
+  select
+    (select count(*) from found),
+    (select jsonb_agg(jsonb_build_object(
+              'id', (x.a).id, 'event_type', (x.a).event_type, 'entity_type', (x.a).entity_type, 'entity_id', (x.a).entity_id,
+              'details', (x.a).details, 'ip_address', (x.a).ip_address, 'client_created_at', (x.a).client_created_at,
+              'actor', (select jsonb_build_object('id', u.id, 'full_name', u.full_name, 'role', u.role) from public.users u where u.id = (x.a).actor_id),
+              'subject', pos.audit_subject((x.a).entity_type, (x.a).entity_id))
+            order by (x.a).client_created_at desc)
+     from page x)
+  into v_total, v_rows;
+
+  return pos.page_json(v_rows, v_total, v_page, 200) || jsonb_build_object(
+    'people', (select coalesce(jsonb_agg(jsonb_build_object(
+                 'id', u.id, 'full_name', u.full_name, 'role', u.role, 'is_active', u.is_active,
+                 'actions', p.actions, 'sales_count', p.sales_count, 'sales_amount', p.sales_amount,
+                 'payments_count', p.payments_count, 'payments_amount', p.payments_amount,
+                 'last_seen', (select max(a.client_created_at) from public.activity_log a where a.actor_id = u.id))
+               order by u.role, u.full_name), '[]'::jsonb)
+               from public.users u
+               cross join lateral (select
+                 (select count(*) from public.activity_log a where a.actor_id = u.id
+                    and (v_from is null or a.client_created_at >= v_from) and (v_to is null or a.client_created_at <= v_to)
+                    and a.event_type not in ('view_opened', 'item_added', 'barcode_scanned')) as actions,
+                 (select count(*) from public.sales s where s.cashier_id = u.id and s.status = 'completed'
+                    and (v_from is null or s.client_created_at >= v_from) and (v_to is null or s.client_created_at <= v_to)) as sales_count,
+                 (select coalesce(sum(s.total_amount), 0) from public.sales s where s.cashier_id = u.id and s.status = 'completed'
+                    and (v_from is null or s.client_created_at >= v_from) and (v_to is null or s.client_created_at <= v_to)) as sales_amount,
+                 (select count(*) from public.credit_payments c where c.received_by = u.id
+                    and (v_from is null or c.client_created_at >= v_from) and (v_to is null or c.client_created_at <= v_to)) as payments_count,
+                 (select coalesce(sum(c.amount), 0) from public.credit_payments c where c.received_by = u.id
+                    and (v_from is null or c.client_created_at >= v_from) and (v_to is null or c.client_created_at <= v_to)) as payments_amount) p
+               where u.is_active or p.actions > 0),
+    'alerts', (select count(*) from public.audit_logs a
+               where (v_from is null or a.client_created_at >= v_from) and (v_to is null or a.client_created_at <= v_to)));
 end $$;
 
 -- ===========================================================================

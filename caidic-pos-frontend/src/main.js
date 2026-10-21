@@ -60,7 +60,7 @@ const NAV = [
     { key: 'staff', label: 'Staff', icon: 'users', roles: OWNER, render: renderStaff,
       help: 'Add staff, change a name, role, or password, and turn on two-factor login for owners.' },
     { key: 'audit', label: 'Audit log', icon: 'shield', roles: OWNER, render: renderAudit,
-      help: "Events that need an owner's eyes: wrong passwords at sign-in, cash differences at the end of a shift, voided sales, items sold beyond the stock count, returns, and devices with a wrong clock. Download it to keep a copy for your records." },
+      help: "Everyone's activity: what each person did and when, cashiers and owners alike: signing in, breaks, sales, credit payments, voids, returns, deliveries, price and stock changes, and staff changes. Tap a person to see only theirs. Needs a look: wrong passwords at sign-in, cash differences, voided sales, items sold beyond the stock count, and devices with a wrong clock. Download keeps a copy for your records." },
   ] },
 ];
 
@@ -413,17 +413,22 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && $('appShell').classList.contains('nav-open')) setMenu(false);
 });
 
-// Dark or light screen, for this device (theme.js). The button names the
-// look it switches to.
+// Dark mode on or off, for this device (theme.js): a switch in the menu,
+// and a sun/moon button on the sign-in screen showing the look it switches to.
 function drawThemeBtn() {
-  const toLight = isDark();
-  $('themeBtn').innerHTML = `${icon(toLight ? 'sun' : 'moon')}<span class="nav-label">${toLight ? 'Light screen' : 'Dark screen'}</span>`;
-  $('themeBtn').title = toLight ? 'Light screen' : 'Dark screen';
+  const dark = isDark();
+  $('themeBtn').setAttribute('aria-checked', String(dark));
+  $('themeBtn').title = `Dark mode: ${dark ? 'on' : 'off'}`;
+  $('loginThemeBtn').setAttribute('aria-checked', String(dark));
+  $('loginThemeBtn').innerHTML = icon(dark ? 'sun' : 'moon');
+  $('loginThemeBtn').title = dark ? 'Switch to light mode' : 'Switch to dark mode';
 }
-$('themeBtn').addEventListener('click', () => {
-  toggleTheme();
-  drawThemeBtn();
-});
+for (const id of ['themeBtn', 'loginThemeBtn']) {
+  $(id).addEventListener('click', () => {
+    toggleTheme();
+    drawThemeBtn();
+  });
+}
 drawThemeBtn();
 
 // ---------------------------------------------------------------------------

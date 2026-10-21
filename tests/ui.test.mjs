@@ -251,12 +251,17 @@ try {
   await waitFor("the dashboard's sales graph", () => $('dashTrend').querySelector('.chart-line, .chart-end'));
   check("the dashboard's graph is today's, by the hour, beside yesterday", $('dashTrendTitle').textContent === 'Sales today, by the hour'
     && $('dashTrend').querySelector('.chart-legend').textContent === 'TodayYesterday');
-  // Dark is the default; the menu switches this device to light and back
-  check('the screen starts dark', doc.documentElement.dataset.theme === 'dark' && $('themeBtn').textContent === 'Light screen');
+  // Dark is the default; the Dark mode switch in the menu turns it off (and
+  // on) for this device, and the sign-in screen's button follows
+  check('the screen starts dark, its switch on', doc.documentElement.dataset.theme === 'dark' && $('themeBtn').getAttribute('aria-checked') === 'true'
+    && $('themeBtn').textContent === 'Dark mode');
   $('themeBtn').click();
-  check('...and switches to light, remembered on this device', doc.documentElement.dataset.theme === 'light' && $('themeBtn').textContent === 'Dark screen'
-    && window.localStorage.getItem('rrc-theme') === 'light' && doc.querySelector('meta[name="theme-color"]').content === '#F5F4F2');
-  $('themeBtn').click();
+  check('...and switches to light, remembered on this device', doc.documentElement.dataset.theme === 'light' && $('themeBtn').getAttribute('aria-checked') === 'false'
+    && $('loginThemeBtn').getAttribute('aria-checked') === 'false' && window.localStorage.getItem('rrc-theme') === 'light'
+    && doc.querySelector('meta[name="theme-color"]').content === '#F5F4F2');
+  $('loginThemeBtn').click();
+  check("...and back to dark from the sign-in screen's button", doc.documentElement.dataset.theme === 'dark' && $('themeBtn').getAttribute('aria-checked') === 'true'
+    && window.localStorage.getItem('rrc-theme') === 'dark');
   for (const screen of ['stock', 'sales', 'shifts', 'returns', 'staff', 'audit']) await openScreen(screen);
   await openScreen('stock');
   await waitFor('stock rows', () => rows('stockTable').length > 100);
@@ -264,6 +269,25 @@ try {
   await waitFor('staff rows', () => rows('usersTable').length === 3);
   check('new passwords are typed hidden', $('usrPin').type === 'password' && $('editStaffPin').type === 'password');
   await openScreen('audit');
+  // Everyone's activity: what the cashier and the owners did, a card each
+  await waitFor("everyone's activity", () => rows('activityTable').length > 0 && $('activityPeople').querySelectorAll('.person-card').length === 3);
+  const actText = rows('activityTable').map((r) => r.textContent.replace(/\s+/g, ' '));
+  check("activity: the cashier's sales and credit payments, by name", actText.some((t) => t.includes('Ana Reyes') && /Sold \d+ items? for ₱/.test(t))
+    && actText.some((t) => t.includes('Ana Reyes') && t.includes('credit payment from')), actText.slice(0, 15));
+  check("activity: and the owner's, signing in", actText.some((t) => t.includes('Rosa Cruz') && t.includes('Clocked in')), actText.filter((t) => t.includes('Rosa')));
+  const anaCard = [...$('activityPeople').querySelectorAll('.person-card')].find((c) => c.textContent.includes('Ana Reyes'));
+  check("activity: Ana's card, with her sales today", anaCard?.textContent.includes('Cashier') && /[1-9][\d,]* sales? · ₱/.test(anaCard.textContent), anaCard?.textContent);
+  anaCard.click();
+  await waitFor("only Ana's activity", () => $('activityPerson').value === anaId && rows('activityTable').length > 0
+    && rows('activityTable').every((r) => r.textContent.includes('Ana Reyes')) && $('activityPeople').querySelector('.is-on')?.textContent.includes('Ana Reyes'));
+  $('activitySteps').click();
+  await waitFor('every step, the screens she opened too', () => rows('activityTable').some((r) => r.textContent.includes('Opened Pick lists')));
+  $('activityDownloadBtn').click();
+  const actCsv = await downloads.at(-1).text();
+  check('activity: downloaded, with who and what', actCsv.startsWith('"Time","Who","Role","What they did"') && actCsv.includes('"Cashier"') && !actCsv.includes('"Rosa Cruz"'), actCsv.slice(0, 200));
+  // Needs a look: the events for an owner's eyes, counted on the tab
+  check('the alerts tab says how many need a look', Number($('auditAlertCount').textContent) > 0, $('auditAlertCount').textContent);
+  $('auditTab').querySelector('[data-tab="alerts"]').click();
   await waitFor('the wrong password on the Audit log', () => rows('auditTable').some((r) => r.textContent.includes('Wrong password for Ana Reyes')));
 
   // The cashier's shift: its timeline, and a download that defuses formulas.
@@ -362,14 +386,35 @@ try {
   check('sales report: the best seller by units comes first', first?.querySelector('.bar-name').textContent === top.name
     && first.querySelector('.bar-value').textContent.startsWith(`${top.q} `), [first?.textContent.replace(/\s+/g, ' '), top]);
   check('sales report: a formula-like item name shows as plain text', $('reportItems').textContent.includes('=HYPERLINK('));
+  // Revenue by item: every item with its SKU, searchable by SKU
+  const skuRows = () => [...$('reportSkuTable').querySelectorAll('tbody tr:not(.empty-row)')];
+  const weekItems = await one(`select count(distinct i.product_id)::int n from public.sale_items i join public.sales s on s.id = i.sale_id
+    where s.status = 'completed' and s.${since('week')}`);
+  check('sales report: revenue by item, each with its SKU', skuRows().length === Math.min(25, weekItems.n)
+    && skuRows().every((tr) => /^[A-Z]+-\d+$/.test(tr.children[0].textContent.trim())), skuRows().map((tr) => tr.children[0].textContent));
+  type($('reportSkuSearch'), 'adh-001');
+  check('...found by its SKU', skuRows().length === 1 && skuRows()[0].textContent.includes('=HYPERLINK('), skuRows().length);
+  type($('reportSkuSearch'), '');
+  // One person's sales: the whole report for them, everyone still under staff
+  type($('reportStaffPick'), anaId);
+  await waitFor("Ana's sales only", () => !$('reportWho').hidden && $('reportWhoName').textContent === 'Ana Reyes'
+    && !$('reportBody').classList.contains('is-loading') && $('reportRangeDates').textContent !== 'Loading…');
+  const anaWeek = await one(`select coalesce(sum(total_amount), 0)::float as amount from public.sales where status = 'completed' and cashier_id = $1 and ${since('week')}`, [anaId]);
+  check("sales report for one person: Ana's total", $('reportTotal').textContent === pesoText(anaWeek.amount), [$('reportTotal').textContent, anaWeek]);
+  const anaRow = $('reportStaff').querySelector('.bar-row.is-on');
+  check('...her row marked under staff, with her top items', anaRow?.textContent.includes('Ana Reyes') && anaRow.textContent.includes('Top:')
+    && anaRow.querySelector('.list-link').textContent === 'Show everyone', anaRow?.textContent.replace(/\s+/g, ' '));
+  $('reportWhoAll').click();
+  await waitFor("everyone's sales again", () => $('reportWho').hidden && $('reportStaffPick').value === ''
+    && !$('reportBody').classList.contains('is-loading') && $('reportTotal').textContent === pesoText(week.amount));
   $('reportPeriod').querySelector('[data-period="month"]').click();
   await reportOf('This month');
   const month = await one(`select coalesce(sum(total_amount), 0)::float as amount from public.sales where status = 'completed' and ${since('month')}`);
   check('sales report: this month, as on the server', $('reportTotal').textContent === pesoText(month.amount) && $('reportNext').disabled, $('reportTotal').textContent);
   $('reportDownloadBtn').click();
   const reportCsv = await downloads.at(-1).text();
-  check('sales report: downloaded with its best sellers, formulas defused', reportCsv.startsWith('"Sales report","This month: ')
-    && reportCsv.includes('"Best sellers"') && reportCsv.includes('"\'=HYPERLINK(') && !reportCsv.includes('"=HYPERLINK('), reportCsv.slice(0, 300));
+  check('sales report: downloaded with revenue by SKU, formulas defused', reportCsv.startsWith('"Sales report","This month: ')
+    && reportCsv.includes('"SKU","Item","Units sold","Unit","Revenue"') && reportCsv.includes('"\'=HYPERLINK(') && !reportCsv.includes('"=HYPERLINK('), reportCsv.slice(0, 300));
   $('reportPrev').click();
   await reportOf('Last month');
   check('sales report: last month, before any sales, is empty', $('reportTotal').textContent === '₱0.00' && !$('reportNext').disabled

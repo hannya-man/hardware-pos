@@ -418,7 +418,7 @@ export const fetchMaterialRequests = (params) => rpc('pos_material_requests', fi
 export const fulfillMaterialRequest = (id) => rpc('pos_material_request_fulfill', { id });
 
 export const fetchSales = (params) => rpc('pos_sales', filters(params));
-export const fetchSalesReport = (period, offset = 0) => rpc('pos_sales_report', { period, offset });
+export const fetchSalesReport = (period, offset = 0, cashierId = null) => rpc('pos_sales_report', filters({ period, offset, cashier_id: cashierId }));
 export const fetchShifts = (params) => rpc('pos_shifts', filters(params));
 export const fetchShift = (id) => rpc('pos_shift', { id });
 export const submitReturn = (payload) => rpc('pos_return_create', payload);
@@ -443,6 +443,7 @@ export const verifyTwoFactor = (id, code) => rpc('pos_two_factor_verify', { id, 
 export const disableTwoFactor = (id) => rpc('pos_two_factor_disable', { id });
 
 export const fetchAuditLog = (params) => rpc('pos_audit_log', filters(params));
+export const fetchActivity = (params) => rpc('pos_activity', filters(params));
 
 // ---------------------------------------------------------------------------
 // Connectivity, outbox push, catalog pull

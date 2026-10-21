@@ -1,12 +1,13 @@
 /* ==========================================================================
    RRC Merchandise POS
-   Two looks from one set of colour tokens. Dark (the default): a near-black
-   studio backdrop with a soft warm glow, surfaces lit along their top edge,
-   white for primary actions and soft white text. Light: warm neutral
-   surfaces and near-black actions. Burnt orange is the one accent, for brand,
-   focus and charts. The theme switch in the menu sets data-theme on <html>
-   (theme.js); printing always uses the light colours. System fonts only, so
-   the app renders instantly and fully offline.
+   Two looks from one set of colour tokens. Dark (the default): charcoal
+   greys rather than black, a soft warm glow from above, surfaces lit along
+   their top edge, white for primary actions and soft white text. Light:
+   warm neutral surfaces and near-black actions. Burnt orange is the one
+   accent, for brand, focus and charts. The Dark mode switch (in the menu and
+   on the sign-in screen) sets data-theme on <html> (theme.js); printing
+   always uses the light colours. System fonts only, so the app renders
+   instantly and fully offline.
    ========================================================================== */
 
 :root {
@@ -95,17 +96,17 @@
   :root:not([data-theme="light"]) {
     color-scheme: dark;
 
-    --bg: #08080A;
-    --surface: #111113;
-    --surface-2: #161619;
-    --surface-3: #1E1E22;
-    --line: #232327;
-    --line-strong: #2E2E33;
-    --line-hover: #46464D;
+    --bg: #18191C;
+    --surface: #202125;
+    --surface-2: #25262B;
+    --surface-3: #2D2E33;
+    --line: #313238;
+    --line-strong: #3C3D44;
+    --line-hover: #55565E;
 
-    --text: #E8E8EB;
-    --text-2: #9E9EA6;
-    --text-3: #85858D;
+    --text: #ECECEF;
+    --text-2: #AEAFB7;
+    --text-3: #93949C;
 
     --ink: #F2F2F4;
     --ink-hover: #FFFFFF;
@@ -129,37 +130,37 @@
     --info: #60A5FA;
     --info-soft: rgba(96, 165, 250, 0.1);
 
-    --segment: #18181B;
-    --thumb: #2A2A30;
-    --row-hover: #151518;
-    --press: #2A2A30;
-    --pop: #232327;
+    --segment: #2A2B30;
+    --thumb: #3A3B42;
+    --row-hover: #26272C;
+    --press: #3A3B42;
+    --pop: #2F3036;
     --pop-text: #F4F4F5;
     --pop-text-2: rgba(255, 255, 255, 0.62);
-    --backdrop: rgba(0, 0, 0, 0.62);
-    --glow: #1B1B20;
-    --glow-warm: rgba(234, 88, 12, 0.09);
-    --rim: inset 0 1px 0 rgba(255, 255, 255, 0.05);
+    --backdrop: rgba(0, 0, 0, 0.5);
+    --glow: #26272C;
+    --glow-warm: rgba(234, 88, 12, 0.07);
+    --rim: inset 0 1px 0 rgba(255, 255, 255, 0.06);
 
-    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.45);
-    --shadow: 0 1px 2px rgba(0, 0, 0, 0.45), 0 10px 28px rgba(0, 0, 0, 0.4);
-    --shadow-lg: 0 28px 80px rgba(0, 0, 0, 0.7);
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3), 0 10px 28px rgba(0, 0, 0, 0.3);
+    --shadow-lg: 0 28px 80px rgba(0, 0, 0, 0.5);
     --shadow-thumb: 0 1px 2px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
     --shadow-up: 0 -12px 40px rgba(0, 0, 0, 0.55);
-    --shadow-hero: 0 40px 120px rgba(0, 0, 0, 0.75), 0 0 0 1px rgba(255, 255, 255, 0.02);
+    --shadow-hero: 0 40px 120px rgba(0, 0, 0, 0.45);
 
     --series-1: #E8652A;
     --series-1-hover: #F27C45;
     --series-wash: 0.22;
-    --series-prev: #6E6E77;
+    --series-prev: #8A8B93;
     --pay-cash: #D95926;
     --pay-gcash: #3987E5;
     --pay-credit: #199E70;
     --pay-bank: #C98500;
     --pay-card: #D55181;
     --pay-other: #9085E9;
-    --heat-0: #1A1A1E;
-    --heat-1: #5A2810;
+    --heat-0: #2A2B30;
+    --heat-1: #6E3014;
     --heat-2: #9A3412;
     --heat-3: #D9531A;
     --heat-4: #F98A4B;
@@ -582,6 +583,26 @@ input.input::-webkit-search-cancel-button {
 .user-name { overflow: hidden; font-size: 13.5px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .user-role { font-size: 12px; color: var(--text-3); }
 .sidebar-foot .btn-ghost { justify-content: flex-start; padding: 0 10px; }
+/* Dark mode on or off: a switch in the menu, a sun or moon on the sign-in screen */
+.theme-switch {
+  display: flex; align-items: center; gap: 10px; width: 100%; height: 40px; padding: 0 10px;
+  border: 0; border-radius: var(--radius-sm); background: none; color: var(--text-2);
+  font-size: 14px; font-weight: 500; text-align: left; transition: background 0.15s, color 0.15s;
+}
+.theme-switch:hover { background: var(--surface-3); color: var(--text); }
+.theme-switch .icon { width: 16px; height: 16px; }
+.theme-switch .nav-label { flex: 1; }
+.switch { position: relative; flex: none; width: 36px; height: 20px; border-radius: 999px; background: var(--line-strong); transition: background 0.2s; }
+.switch::after {
+  content: ""; position: absolute; top: 2px; left: 2px; width: 16px; height: 16px; border-radius: 50%;
+  background: #fff; box-shadow: 0 1px 2px rgba(0, 0, 0, 0.3); transition: transform 0.22s var(--ease-out);
+}
+.theme-switch[aria-checked="true"] .switch { background: var(--accent-fill); }
+.theme-switch[aria-checked="true"] .switch::after { transform: translateX(16px); }
+.login-theme {
+  position: fixed; top: calc(16px + env(safe-area-inset-top)); right: 16px; z-index: 5; width: 40px; height: 40px;
+  border: 1px solid var(--line); border-radius: 50%; background: var(--surface); box-shadow: var(--rim), var(--shadow-sm); color: var(--text-2);
+}
 
 .main {
   display: flex; flex: 1; flex-direction: column; min-width: 0; min-height: 0;
@@ -829,6 +850,37 @@ input.input::-webkit-search-cancel-button {
 .price-sheet td:nth-child(2) { width: 18%; color: #444; }
 .price-sheet td:last-child { width: 18%; text-align: right; font-weight: 600; }
 
+/* ---------- Audit log: everyone's activity ---------- */
+.audit-bar { flex-wrap: wrap; justify-content: flex-start; }
+.tab-count {
+  display: inline-grid; place-items: center; min-width: 20px; height: 20px; margin-left: 7px; padding: 0 6px;
+  border-radius: 999px; background: var(--bad-soft); color: var(--bad); font-size: 11.5px; font-weight: 700; font-variant-numeric: tabular-nums;
+}
+.people-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 12px; }
+.people-grid:empty { display: none; }
+.person-card {
+  display: grid; gap: 12px; padding: 14px 16px; border: 1px solid var(--line); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--rim); color: var(--text); text-align: left;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+.person-card:hover { border-color: var(--line-hover); }
+.person-card.is-on { border-color: var(--ink); box-shadow: inset 0 0 0 1px var(--ink); }
+.person-card-head { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.person-card-head > span:last-child { display: grid; min-width: 0; }
+.person-card-head strong { overflow: hidden; font-size: 14px; text-overflow: ellipsis; white-space: nowrap; }
+.person-card-head strong + span { font-size: 12.5px; color: var(--text-3); }
+.person-card-stats { display: grid; gap: 3px; font-size: 13px; color: var(--text-2); }
+.person-card-stats b { color: var(--text); font-weight: 600; font-variant-numeric: tabular-nums; }
+/* A dot by kind of action beside each line (the words say it as well) */
+.act { display: inline-flex; align-items: baseline; gap: 8px; }
+.act::before { content: ""; flex: none; width: 7px; height: 7px; border-radius: 50%; background: var(--line-strong); transform: translateY(-1px); }
+.act-sale::before { background: var(--ok); }
+.act-pay::before { background: var(--info); }
+.act-void::before { background: var(--bad); }
+.act-shift::before { background: var(--text-3); }
+.act-stock::before { background: var(--warn); }
+.act-staff::before { background: var(--accent); }
+
 /* ---------- Sales report and graphs (charts.js) ----------
    Thin marks in the chart tokens on hairline grids, text always in the text
    colours. A graph waits (is-waiting) until it scrolls into view, then plays
@@ -945,6 +997,32 @@ input.input::-webkit-search-cancel-button {
 .list-more { display: flex; justify-content: center; padding-top: 18px; }
 @keyframes grow-x { from { transform: scaleX(0); } }
 
+/* A line under a bar (each person's top items) and a small text button */
+.bar-sub { font-size: 12.5px; line-height: 1.4; color: var(--text-3); }
+.list-link { justify-self: start; padding: 0; border: 0; background: none; color: var(--accent); font-size: 13px; font-weight: 500; }
+.list-link:hover { text-decoration: underline; }
+.bar-row.is-on { margin: -8px -10px; padding: 8px 10px; border-radius: var(--radius-sm); background: var(--surface-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.report-who { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 6px 12px; }
+.report-who strong { color: var(--text); }
+
+/* Revenue by item */
+.sku-head { flex-wrap: wrap; }
+.sku-tools { display: flex; flex-wrap: wrap; gap: 8px; }
+.sku-tools .search { width: 220px; }
+.sku-tools .search .icon-lead { top: 8px; }
+.th-sort { padding: 0; border: 0; background: none; color: inherit; font: inherit; white-space: nowrap; }
+.th-sort:hover { color: var(--text); }
+th[aria-sort="descending"] .th-sort::after { content: " ↓"; }
+th[aria-sort="ascending"] .th-sort::after { content: " ↑"; }
+th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one arrow is enough */
+.sku-code { font: 12.5px/1.4 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace; color: var(--text-2); white-space: nowrap; }
+.cell-unit { font-size: 12.5px; color: var(--text-3); }
+.sku-amount { font-weight: 600; }
+.share-cell { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; }
+.share-bar { width: 48px; height: 6px; overflow: hidden; border-radius: 0 3px 3px 0; background: var(--surface-3); }
+.share-bar i { display: block; height: 100%; min-width: 1px; border-radius: 0 3px 3px 0; background: var(--series-1); }
+.sku-foot { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding-top: 34px; }
+
 /* Waiting to be scrolled to; redrawn for a new width without the entrance */
 .is-waiting .chart-line, .is-waiting .chart-sofar, .is-waiting .chart-prev, .is-waiting .chart-area, .is-waiting .chart-end, .is-waiting .chart-peak,
 .is-waiting .donut-ring, .is-waiting .heat-cell, .is-waiting .bar-fill { animation-play-state: paused; }
@@ -1003,6 +1081,8 @@ input.input::-webkit-search-cancel-button {
   .nav-item { justify-content: center; padding: 0; }
   .user-chip { justify-content: center; padding: 6px 0; }
   .sidebar-foot .btn-ghost { justify-content: center; }
+  .theme-switch { justify-content: center; padding: 0; }
+  .theme-switch .switch { display: none; }
   .topbar, .void-banner { padding-left: 20px; padding-right: 20px; }
   .content { padding: 20px; }
   .catalog-head { top: -20px; margin-top: -20px; padding-top: 20px; }
@@ -1081,6 +1161,8 @@ input.input::-webkit-search-cancel-button {
   .user-chip { justify-content: flex-start; padding: 6px 8px; }
   .sidebar-foot { padding-bottom: calc(12px + env(safe-area-inset-bottom)); }
   .sidebar-foot .btn-ghost { justify-content: flex-start; padding: 0 12px; }
+  .theme-switch { justify-content: flex-start; height: 46px; padding: 0 12px; font-size: 15px; }
+  .theme-switch .switch { display: block; }
 
   /* Top bar: menu, the screen's name, the connection, Sync now */
   .menu-btn { display: inline-grid; margin-left: -8px; color: var(--text); }
@@ -1132,6 +1214,11 @@ input.input::-webkit-search-cancel-button {
   #reportDownloadBtn { width: 40px; height: 40px; padding: 0; }
   .report-grid { gap: 14px; }
   .report-error { flex-wrap: wrap; }
+  .report-staff { order: 3; flex: 1 1 100%; width: 100%; }
+  .sku-tools, .sku-tools .search { flex: 1 1 100%; width: 100%; }
+  .sku-tools .search .icon-lead { top: 11px; }
+  .sku-tools select { flex: 1 1 100%; }
+  .sku-foot { padding-top: 26px; }
   .bar-list { gap: 12px; }
   .donut { justify-content: center; }
   .donut-legend { flex-basis: 100%; }
@@ -1185,6 +1272,30 @@ input.input::-webkit-search-cancel-button {
   #auditTable td:nth-child(2) { grid-area: what; font-weight: 500; }
   #auditTable td:nth-child(3) { grid-area: who; font-size: 13px; color: var(--text-2); }
   #auditTable td:nth-child(4) { grid-area: from; font-size: 12.5px; color: var(--text-3); text-align: right; }
+
+  #activityTable tr { grid-template-areas: "what what" "who time"; }
+  #reportSkuTable tr { grid-template-areas: "name amount" "sku share" "units price"; row-gap: 4px; }
+  #reportSkuTable td:nth-child(1) { grid-area: sku; }
+  #reportSkuTable td:nth-child(2) { grid-area: name; }
+  #reportSkuTable td:nth-child(3) { grid-area: units; font-size: 13px; color: var(--text-2); text-align: left; }
+  #reportSkuTable td:nth-child(3)::before { content: "Units sold "; color: var(--text-3); }
+  #reportSkuTable td:nth-child(4) { grid-area: amount; align-self: start; }
+  #reportSkuTable td:nth-child(5) { grid-area: share; }
+  #reportSkuTable td:nth-child(6) { grid-area: price; font-size: 13px; color: var(--text-2); }
+  #reportSkuTable td:nth-child(6)::before { content: "Avg. "; color: var(--text-3); }
+  #reportSkuTable td:nth-child(7) { display: none; }
+  #activityTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); text-align: right; }
+  #activityTable td:nth-child(2) { grid-area: who; font-size: 13px; color: var(--text-2); }
+  #activityTable td:nth-child(3) { grid-area: what; font-weight: 500; }
+  #activityTable td:nth-child(4) { display: none; }
+  #activityTable .avatar { width: 22px; height: 22px; font-size: 9.5px; }
+  /* The people side by side, swiped sideways */
+  .people-grid {
+    grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(236px, 80%);
+    margin: 0 -16px; padding: 0 16px 2px; overflow-x: auto; scroll-snap-type: x mandatory; scroll-padding: 0 16px; scrollbar-width: none; overscroll-behavior-x: contain;
+  }
+  .people-grid::-webkit-scrollbar { display: none; }
+  .person-card { scroll-snap-align: start; }
 
   #creditTable tr { grid-template-areas: "name owes" "phone actions" "last actions"; }
   #creditTable td:nth-child(1) { grid-area: name; }

@@ -656,6 +656,33 @@ res = await rpc(db, 'pos_audit_log', { auth: U(o1), args: { from: new Date(Date.
 check('audit log by date', res.status === 200 && res.body.total === 0, res.body);
 refused('audit log is for owners', await rpc(db, 'pos_audit_log', { auth: U(cashierToken), args: {} }), 403);
 
+// Everyone's activity: what each person did, the cashier and the owners alike
+res = await rpc(db, 'pos_activity', { auth: U(o1), args: {} });
+ok('activity log', res);
+const acts = res.body.data;
+const notSteps = `event_type not in ('view_opened', 'item_added', 'barcode_scanned')`;
+check('activity: everyone, newest first, without the small steps', res.body.total === (await one(`select count(*)::int n from public.activity_log where ${notSteps}`)).n
+  && acts.every((a, i) => i === 0 || acts[i - 1].client_created_at >= a.client_created_at) && !acts.some((a) => a.event_type === 'view_opened'), res.body.total);
+check('activity: the cashier and both owners are on it, with their roles', [[cashier, 'cashier'], [owner1, 'owner'], [owner2, 'owner']]
+  .every(([id, role]) => acts.some((a) => a.actor?.id === id && a.actor.role === role)), [...new Set(acts.map((a) => a.actor?.full_name))]);
+const aboutSale = acts.find((a) => a.entity_type === 'sale' && a.entity_id);
+check('activity: says which sale it was about', aboutSale?.subject === aboutSale?.entity_id.slice(0, 8).toUpperCase(), aboutSale);
+check('activity: an owner approving a void', acts.some((a) => a.actor.id === owner2 && ['sale_voided', 'void_approved'].includes(a.event_type)));
+res = await rpc(db, 'pos_activity', { auth: U(o1), args: { user_id: cashier, steps: true } });
+check("activity: one person's, every step included", res.body.data.length > 0 && res.body.data.every((a) => a.actor.id === cashier)
+  && res.body.data.some((a) => a.event_type === 'view_opened'), res.body.total);
+const people = res.body.people;
+const ana = people.find((p) => p.id === cashier);
+check("activity: each person's totals, whoever is picked", people.length >= 3 && ana.role === 'cashier' && ana.actions > 0 && ana.last_seen
+  && ana.sales_count === (await one(`select count(*)::int n from public.sales where cashier_id = $1 and status = 'completed'`, [cashier])).n
+  && near(ana.payments_amount, (await one(`select coalesce(sum(amount), 0)::float a from public.credit_payments where received_by = $1`, [cashier])).a)
+  && people[0].role === 'cashier', people.map((p) => [p.full_name, p.actions, p.sales_count]));
+check('activity: how many events need a look', res.body.alerts === (await one(`select count(*)::int n from public.audit_logs`)).n, res.body.alerts);
+res = await rpc(db, 'pos_activity', { auth: U(o1), args: { from: new Date(Date.now() + 3600e3).toISOString() } });
+check('activity by date', res.status === 200 && res.body.total === 0 && res.body.people.every((p) => p.actions === 0), res.body.total);
+refused('activity is for owners', await rpc(db, 'pos_activity', { auth: U(cashierToken), args: {} }), 403);
+refused('activity: a made-up person', await rpc(db, 'pos_activity', { auth: U(o1), args: { user_id: 'nobody' } }), 422);
+
 // Erasing a customer's details on request (Data Privacy Act)
 const quietId = randomUUID();
 const owingId = randomUUID();
@@ -743,6 +770,25 @@ const cementSold = week.items.find((x) => x.product_id === cement.product.id);
 check('sales report: an item with its units and money', cementSold && cementSold.unit === cement.product.unit
   && near(cementSold.quantity, (await one(`select sum(i.quantity)::float q from public.sale_items i join public.sales s on s.id = i.sale_id
     where i.product_id = $1 and s.status = 'completed' and s.client_created_at >= ${weekStart}`, [cement.product.id])).q), cementSold);
+check('sales report: every item with its SKU', cementSold?.sku === cement.product.sku && week.items.every((x) => x.sku), cementSold);
+// One person's sales: what they sold, and nobody else's
+const cashierWeek = await one(`select coalesce(sum(total_amount), 0)::float as amount, count(*)::int as n from public.sales
+  where status = 'completed' and cashier_id = $1 and client_created_at >= ${weekStart}`, [cashier]);
+res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', cashier_id: cashier } });
+const mine = res.body;
+check("sales report for one person: only their sales, and all of them add up", res.status === 200 && mine.cashier?.id === cashier
+  && near(mine.totals.amount, cashierWeek.amount) && mine.totals.count === cashierWeek.n
+  && [mine.series, mine.items, mine.payment, mine.categories, mine.heat].every((rows) => near(sumOf(rows), cashierWeek.amount)), { totals: mine.totals, cashierWeek });
+check('sales report for one person: their items are from their sales', near(sumOf(mine.items),
+  (await one(`select coalesce(sum(i.line_total), 0)::float a from public.sale_items i join public.sales s on s.id = i.sale_id
+    where s.status = 'completed' and s.cashier_id = $1 and s.client_created_at >= ${weekStart}`, [cashier])).a), mine.items.length);
+check('sales report for one person: everyone is still under staff, to pick another', near(sumOf(mine.staff), week.totals.amount)
+  && mine.people.some((u) => u.id === owner1) && mine.people.some((u) => u.id === cashier), mine.staff.map((x) => x.name));
+const anaStaff = week.staff.find((x) => x.id === cashier);
+check("sales report: each person's top items, best first", anaStaff && anaStaff.role === 'cashier' && anaStaff.top_items.length >= 1 && anaStaff.top_items.length <= 5
+  && anaStaff.top_items.every((t, i) => i === 0 || Number(anaStaff.top_items[i - 1].amount) >= Number(t.amount))
+  && sumOf(anaStaff.top_items) <= Number(anaStaff.amount) + 0.001, anaStaff);
+refused('sales report: a made-up person', await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', cashier_id: 'nobody' } }), 422);
 res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'week', offset: 1 } });
 check('sales report: last week, with no sales, is empty but whole', res.status === 200 && res.body.totals.count === 0 && res.body.items.length === 0
   && res.body.series.length === 7 && near(sumOf(res.body.series), 0), res.body.totals);
