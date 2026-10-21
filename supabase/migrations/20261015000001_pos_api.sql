@@ -1806,6 +1806,98 @@ begin
   return pos.page_json(v_rows, v_total, v_page, 100) || jsonb_build_object('totals', v_totals);
 end $$;
 
+-- args: { period: day | week | month | year, offset? }. The Sales report for
+-- one period in the store's time zone (offset 0 is the current one, 1 the one
+-- before, ...): totals against the period before (up to the same moment,
+-- for the one under way), sales over time (by hour,
+-- day or month), every item sold (most money first), and the split by
+-- payment, category, staff and hour of the day. Completed sales only; voided
+-- ones are counted apart. Times in series (and now) are the store's local time.
+create or replace function public.pos_sales_report(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
+declare
+  v_unit text := case args ->> 'period' when 'day' then 'day' when 'month' then 'month' when 'year' then 'year' else 'week' end;
+  v_bucket text := case args ->> 'period' when 'day' then 'hour' when 'year' then 'month' else 'day' end;
+  v_offset integer;
+  v_tz text := pos.store_timezone();
+  v_step interval;
+  v_local timestamp;
+  v_start timestamptz;
+  v_end timestamptz;
+  v_before timestamptz;
+  v_before_end timestamptz;
+begin
+  perform pos.require_owner(auth);
+  v_offset := least(greatest(coalesce(pos.arg_number(args, 'offset', 'offset')::integer, 0), 0), 5000);
+  v_step := ('1 ' || v_unit)::interval;
+  v_local := date_trunc(v_unit, now() at time zone v_tz) - v_offset * v_step;
+  v_start := v_local at time zone v_tz;
+  v_end := (v_local + v_step) at time zone v_tz;
+  v_before := (v_local - v_step) at time zone v_tz;
+  -- A period still under way is compared with the one before up to the same
+  -- moment (Monday morning against last Monday morning, not all of last week).
+  v_before_end := least(v_start, v_before + (now() - v_start));
+
+  return (
+    with sold as (
+      select s.id, s.total_amount, s.payment_method, s.amount_paid, s.cashier_id,
+             s.client_created_at at time zone v_tz as local_at
+      from public.sales s
+      where s.status = 'completed' and s.client_created_at >= v_start and s.client_created_at < v_end
+    ), lines as (
+      select i.product_id, i.name_snapshot, i.quantity, i.line_total, i.sale_id
+      from public.sale_items i join sold s on s.id = i.sale_id
+    )
+    select jsonb_build_object(
+      'period', v_unit,
+      'offset', v_offset,
+      'first_day', to_char(v_local, 'YYYY-MM-DD'),
+      'last_day', to_char(v_local + v_step - interval '1 day', 'YYYY-MM-DD'),
+      'now', to_char(now() at time zone v_tz, 'YYYY-MM-DD"T"HH24:MI:SS'),
+      'totals', jsonb_build_object(
+        'amount', (select coalesce(sum(s.total_amount), 0) from sold s),
+        'count', (select count(*) from sold),
+        'previous_amount', (select coalesce(sum(s.total_amount), 0) from public.sales s
+                            where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end),
+        'previous_count', (select count(*) from public.sales s
+                           where s.status = 'completed' and s.client_created_at >= v_before and s.client_created_at < v_before_end),
+        'credit_given', (select coalesce(sum(s.total_amount - coalesce(s.amount_paid, 0)), 0) from sold s where s.payment_method = 'credit'),
+        'credit_collected', (select coalesce(sum(p.amount), 0) from public.credit_payments p
+                             where p.client_created_at >= v_start and p.client_created_at < v_end),
+        'voided_count', (select count(*) from public.sales s
+                         where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end),
+        'voided_amount', (select coalesce(sum(s.total_amount), 0) from public.sales s
+                          where s.status = 'voided' and s.client_created_at >= v_start and s.client_created_at < v_end)),
+      'series', (select jsonb_agg(jsonb_build_object('at', to_char(b.at, 'YYYY-MM-DD"T"HH24:MI:SS'),
+                                                     'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by b.at)
+                 from generate_series(v_local, v_local + v_step - ('1 ' || v_bucket)::interval, ('1 ' || v_bucket)::interval) as b(at)
+                 left join (select date_trunc(v_bucket, s.local_at) as at, sum(s.total_amount) as amount, count(*) as n
+                            from sold s group by 1) x on x.at = b.at),
+      'items', (select coalesce(jsonb_agg(jsonb_build_object('product_id', x.product_id, 'name', coalesce(p.name, x.name), 'unit', p.unit,
+                                                             'quantity', x.quantity, 'amount', x.amount, 'sales', x.sales)
+                                          order by x.amount desc, coalesce(p.name, x.name)), '[]'::jsonb)
+                from (select l.product_id, max(l.name_snapshot) as name, sum(l.quantity) as quantity,
+                             sum(l.line_total) as amount, count(distinct l.sale_id) as sales
+                      from lines l group by l.product_id) x
+                left join public.products p on p.id = x.product_id),
+      'payment', (select coalesce(jsonb_agg(jsonb_build_object('method', x.payment_method, 'amount', x.amount, 'count', x.n)
+                                            order by x.amount desc), '[]'::jsonb)
+                  from (select s.payment_method, sum(s.total_amount) as amount, count(*) as n from sold s group by 1) x),
+      'categories', (select coalesce(jsonb_agg(jsonb_build_object('name', coalesce(c.name, 'Uncategorized'), 'amount', x.amount)
+                                               order by x.amount desc), '[]'::jsonb)
+                     from (select p.category_id, sum(l.line_total) as amount
+                           from lines l left join public.products p on p.id = l.product_id group by 1) x
+                     left join public.categories c on c.id = x.category_id),
+      'staff', (select coalesce(jsonb_agg(jsonb_build_object('name', coalesce(u.full_name, 'Unknown'), 'amount', x.amount, 'count', x.n)
+                                          order by x.amount desc), '[]'::jsonb)
+                from (select s.cashier_id, sum(s.total_amount) as amount, count(*) as n from sold s group by 1) x
+                left join public.users u on u.id = x.cashier_id),
+      'hours', (select jsonb_agg(jsonb_build_object('hour', h.h, 'amount', coalesce(x.amount, 0), 'count', coalesce(x.n, 0)) order by h.h)
+                from generate_series(0, 23) as h(h)
+                left join (select extract(hour from s.local_at)::integer as hr, sum(s.total_amount) as amount, count(*) as n
+                           from sold s group by 1) x on x.hr = h.h)));
+end $$;
+
 -- args: { cashier_id?, page? }. Newest first, with what each one sold.
 create or replace function public.pos_shifts(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
 language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$

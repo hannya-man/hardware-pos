@@ -311,6 +311,52 @@ try {
   await waitFor('the voided state', () => $('voidState').textContent.includes('Voided'));
   $('voidOverlay').querySelector('[data-close]').click();
 
+  // The Sales report: this week as on the server, its best sellers, another
+  // period and the one before it, and the download.
+  const pesoText = (n) => new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' }).format(n);
+  const reportOf = (name) => waitFor(`the sales report for ${name}`, () => $('reportRangeName').textContent === name && !$('reportBody').hidden
+    && !$('reportBody').classList.contains('is-loading') && $('reportRangeDates').textContent !== 'Loading…');
+  const since = (unit) => `client_created_at >= (date_trunc('${unit}', now() at time zone 'Asia/Manila') at time zone 'Asia/Manila')`;
+  await openScreen('reports');
+  await reportOf('This week');
+  const week = await one(`select coalesce(sum(total_amount), 0)::float as amount, count(*)::int as n from public.sales where status = 'completed' and ${since('week')}`);
+  check('sales report: this week\'s total and number of sales, as on the server', $('reportTotal').textContent === pesoText(week.amount)
+    && $('reportCount').textContent === week.n.toLocaleString('en-PH'), [$('reportTotal').textContent, $('reportCount').textContent, week]);
+  check('sales report: the voided sale is noted apart', !$('reportVoided').hidden && $('reportVoided').textContent.includes('1 sale voided'), $('reportVoided').textContent);
+  const daysSoFar = (await one(`select extract(isodow from now() at time zone 'Asia/Manila')::int as d`)).d; // Monday 1 .. Sunday 7
+  check('sales report: a column for each day of the week so far, and the busiest hours', $('reportSeries').querySelectorAll('.chart-col').length === daysSoFar
+    && !$('reportHoursCard').hidden && $('reportHours').querySelector('.chart-bar'), $('reportSeries').querySelectorAll('.chart-col').length);
+  const todayCol = [...$('reportSeries').querySelectorAll('.chart-col')].find((g) => g.querySelector('.chart-bar'));
+  todayCol.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  const tip = $('reportSeries').querySelector('.chart-tip');
+  check('sales report: a tapped column says its amount', !tip.hidden && tip.querySelector('strong').textContent === pesoText(week.amount), tip.textContent);
+  $('reportSeriesTable').click();
+  check('sales report: the chart as a table, without the days still to come', $('reportSeries').querySelectorAll('.mini-table tbody tr').length === daysSoFar
+    && $('reportSeriesTable').textContent === 'Show as chart');
+  $('reportSeriesTable').click();
+  $('reportItemsBy').querySelector('[data-by="quantity"]').click();
+  const top = await one(`select coalesce(p.name, max(i.name_snapshot)) as name, sum(i.quantity)::float as q from public.sale_items i
+    join public.sales s on s.id = i.sale_id left join public.products p on p.id = i.product_id
+    where s.status = 'completed' and s.${since('week')} group by i.product_id, p.name order by q desc limit 1`);
+  const first = $('reportItems').querySelector('.bar-row');
+  check('sales report: the best seller by units comes first', first?.querySelector('.bar-name').textContent === top.name
+    && first.querySelector('.bar-value').textContent.startsWith(`${top.q} `), [first?.textContent.replace(/\s+/g, ' '), top]);
+  check('sales report: a formula-like item name shows as plain text', $('reportItems').textContent.includes('=HYPERLINK('));
+  $('reportPeriod').querySelector('[data-period="month"]').click();
+  await reportOf('This month');
+  const month = await one(`select coalesce(sum(total_amount), 0)::float as amount from public.sales where status = 'completed' and ${since('month')}`);
+  check('sales report: this month, as on the server', $('reportTotal').textContent === pesoText(month.amount) && $('reportNext').disabled, $('reportTotal').textContent);
+  $('reportDownloadBtn').click();
+  const reportCsv = await downloads.at(-1).text();
+  check('sales report: downloaded with its best sellers, formulas defused', reportCsv.startsWith('"Sales report","This month: ')
+    && reportCsv.includes('"Best sellers"') && reportCsv.includes('"\'=HYPERLINK(') && !reportCsv.includes('"=HYPERLINK('), reportCsv.slice(0, 300));
+  $('reportPrev').click();
+  await reportOf('Last month');
+  check('sales report: last month, before any sales, is empty', $('reportTotal').textContent === '₱0.00' && !$('reportNext').disabled
+    && $('reportSeries').textContent.includes('No sales last month.') && $('reportItems').textContent.includes('No sales last month.'), $('reportSeries').textContent);
+  $('reportNext').click();
+  await reportOf('This month');
+
   // The till's key is replaced (say the old one leaked): Sync now asks for
   // the new one, checks it with the server, and sends what waited meanwhile.
   await server.query(`update public.terminals set is_active = false`);

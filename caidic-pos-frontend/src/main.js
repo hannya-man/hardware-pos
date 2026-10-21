@@ -13,6 +13,7 @@ import { $, esc, icon, peso, fmtTime, initials, sanitizeDecimal, keepDecimal, hy
 import { renderBilling, clearCart, cancelCheckout } from './billing.js';
 import { renderCredit } from './credit.js';
 import { renderDashboard } from './dashboard.js';
+import { renderReports } from './reports.js';
 import { renderStock, renderMaterialRequests } from './inventory.js';
 import { renderSales, renderShifts, renderReturns, renderStaff, renderAudit } from './admin.js';
 import { startVoidAlerts, stopVoidAlerts } from './voids.js';
@@ -49,6 +50,8 @@ const NAV = [
       help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count.' },
     { key: 'sales', label: 'Sales', icon: 'bag', roles: OWNER, render: renderSales,
       help: 'Every sale, with its items and how it was paid. Tap a sale to see it. To void one, a second owner has to approve within 10 minutes, or the sale stays as it is.' },
+    { key: 'reports', label: 'Sales report', icon: 'chart', roles: OWNER, render: renderReports,
+      help: 'What sold and for how much in a day, week, month, or year: the best sellers, how customers paid, sales by category and by staff, and the busiest hours. The arrows go back to earlier ones. Download saves it all as a spreadsheet.' },
     { key: 'shifts', label: 'Shifts', icon: 'clock', roles: OWNER, render: renderShifts,
       help: 'When each person clocked in and out, what they sold, any cash difference, and everything they did. Tap a shift to see its timeline.' },
     { key: 'returns', label: 'Returns', icon: 'undo', roles: OWNER, render: renderReturns,

@@ -418,6 +418,7 @@ export const fetchMaterialRequests = (params) => rpc('pos_material_requests', fi
 export const fulfillMaterialRequest = (id) => rpc('pos_material_request_fulfill', { id });
 
 export const fetchSales = (params) => rpc('pos_sales', filters(params));
+export const fetchSalesReport = (period, offset = 0) => rpc('pos_sales_report', { period, offset });
 export const fetchShifts = (params) => rpc('pos_shifts', filters(params));
 export const fetchShift = (id) => rpc('pos_shift', { id });
 export const submitReturn = (payload) => rpc('pos_return_create', payload);
