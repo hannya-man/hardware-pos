@@ -1,9 +1,11 @@
-// dashboard.js — sales, money owed, stock value and alerts, who's working,
-// and what's selling or not (owners).
+// dashboard.js — sales and how they're going against the period before,
+// money owed, stock value and alerts, who's working, and what's selling or
+// not (owners).
 
-import { fetchDashboard, flushOutbox } from './sync-worker.js';
+import { fetchDashboard, fetchSalesReport, flushOutbox } from './sync-worker.js';
 import { withServerAuth } from './session.js';
 import { $, esc, peso, qty, fmtTime, countTo } from './ui.js';
+import { salesTrend } from './charts.js';
 
 const METHODS = [['cash', 'Cash'], ['gcash', 'GCash / PayMaya'], ['credit', 'Credit']];
 // Just the time for today; the date too for a shift left open since an earlier day.
@@ -40,6 +42,21 @@ export async function renderDashboard() {
     $('dashSales').textContent = '—';
     $('dashSalesSub').textContent = `Couldn't load. ${err.message}`;
   }
+  await drawTrend();
+}
+
+// Sales over the same period, beside the one before (the Sales report's graph).
+const TREND = { today: ['day', 'Sales today, by the hour'], week: ['week', 'Sales this week'], month: ['month', 'Sales this month'], year: ['year', 'Sales this year'] };
+async function drawTrend() {
+  const [reportPeriod, title] = TREND[period];
+  $('dashTrendTitle').textContent = title;
+  try {
+    const r = await withServerAuth(() => fetchSalesReport(reportPeriod, 0));
+    if (TREND[period][0] !== reportPeriod) return; // another period was picked meanwhile
+    salesTrend($('dashTrend'), r);
+  } catch (err) {
+    $('dashTrend').innerHTML = `<p class="chart-empty">Couldn't load the graph. ${esc(err.message)}</p>`;
+  }
 }
 
 $('dashPeriod').addEventListener('click', (e) => {
@@ -48,3 +65,5 @@ $('dashPeriod').addEventListener('click', (e) => {
   period = btn.dataset.period;
   renderDashboard();
 });
+// Opens the Sales report from the menu, so it's logged like any other screen
+$('dashReportBtn').addEventListener('click', () => $('navItems').querySelector('[data-view="reports"]')?.click());

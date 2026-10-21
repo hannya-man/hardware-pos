@@ -1,6 +1,7 @@
 // main.js — startup, sign-in (clock in), the menu, sign-out (break or end of
 // shift), and Sync now.
 
+import { isDark, toggleTheme } from './theme.js'; // first: the colours are set before anything is drawn
 import { db, isProvisioned, setTerminalKey, getTerminalKey, getTerminalId, getOpenShift, lastCountedCash, getSyncMeta, setSyncMeta } from './local-db.js';
 import { verifyStaffLogin } from './input-handler.js';
 import {
@@ -411,6 +412,19 @@ $('navBackdrop').addEventListener('click', () => setMenu(false));
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && $('appShell').classList.contains('nav-open')) setMenu(false);
 });
+
+// Dark or light screen, for this device (theme.js). The button names the
+// look it switches to.
+function drawThemeBtn() {
+  const toLight = isDark();
+  $('themeBtn').innerHTML = `${icon(toLight ? 'sun' : 'moon')}<span class="nav-label">${toLight ? 'Light screen' : 'Dark screen'}</span>`;
+  $('themeBtn').title = toLight ? 'Light screen' : 'Dark screen';
+}
+$('themeBtn').addEventListener('click', () => {
+  toggleTheme();
+  drawThemeBtn();
+});
+drawThemeBtn();
 
 // ---------------------------------------------------------------------------
 // Sign out: a break keeps the shift open; ending it is a blind cash count

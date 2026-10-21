@@ -113,7 +113,7 @@ pages. Keep dated copies, with their terms, and review them every year
 - **Requirements:** the store's rules (roles, two-owner voids, blind cash
   counts, offline selling) are written in this folder, in the code's
   comments, and as tests.
-- **Verification:** 480+ automated checks in `tests/` run on every change:
+- **Verification:** 500+ automated checks in `tests/` run on every change:
   the server functions on a real PostgreSQL database, the app's sync code
   through a full store day, the offline cache, and the screens themselves,
   used in a simulated browser (selling, credit, pick lists, the sales
