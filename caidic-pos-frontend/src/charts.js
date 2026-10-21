@@ -476,18 +476,22 @@ export function heatmap(box, r, { table = false, animate = true } = {}) {
 }
 
 // ---------------------------------------------------------------------------
-// A ranked list with a bar under each row, its length against the largest
+// A ranked list with a bar under each row, its length against the largest.
+// A row can have a line under its bar (sub) and a button (link: its label
+// and the data-value it carries), and be marked as the one chosen (on).
 // ---------------------------------------------------------------------------
 
-export function barList(list, rows, { name, value, text, rank = false, empty, animate = true }) {
+export function barList(list, rows, { name, value, text, sub = null, link = null, on = null, rank = false, empty, animate = true }) {
   const max = Math.max(0, ...rows.map(value));
   list.innerHTML = rows.length
     ? rows.map((x, i) => `
-      <li class="bar-row">
+      <li class="bar-row${on?.(x) ? ' is-on' : ''}">
         ${rank ? `<span class="bar-rank">${i + 1}</span>` : ''}
         <div class="bar-main">
           <div class="bar-text"><span class="bar-name" title="${esc(name(x))}">${esc(name(x))}</span><span class="bar-value">${esc(text(x))}</span></div>
           <div class="bar-track"><div class="bar-fill"></div></div>
+          ${sub?.(x) ? `<span class="bar-sub">${esc(sub(x))}</span>` : ''}
+          ${link ? `<button type="button" class="list-link" data-value="${esc(link(x).value)}">${esc(link(x).label)}</button>` : ''}
         </div>
       </li>`).join('')
     : `<li class="bar-empty">${esc(empty)}</li>`;

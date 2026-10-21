@@ -6,7 +6,7 @@
 import QRCode from 'qrcode';
 import {
   flushOutbox, fetchSales, fetchShifts, fetchShift, submitReturn,
-  fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor, fetchAuditLog,
+  fetchUsers, createUser, updateUser, setupTwoFactor, verifyTwoFactor, disableTwoFactor, fetchAuditLog, fetchActivity,
 } from './sync-worker.js';
 import { session, withServerAuth } from './session.js';
 import { askToVoid, openVoidRequest } from './voids.js';
@@ -183,7 +183,7 @@ let shiftData = null;
 
 const STEP_EVENTS = new Set(['item_added', 'barcode_scanned', 'view_opened']); // only with "Show every step"
 const SHOWN_FROM_RECORDS = new Set(['shift_started', 'shift_ended', 'sale_completed', 'credit_payment_received']);
-const SCREEN_NAMES = { dashboard: 'Dashboard', billing: 'Sell', credit: 'Credit', materialRequests: 'Pick lists', stock: 'Stock', sales: 'Sales', shifts: 'Shifts', returns: 'Returns', staff: 'Staff', audit: 'Audit log' };
+const SCREEN_NAMES = { dashboard: 'Dashboard', billing: 'Sell', credit: 'Credit', materialRequests: 'Pick lists', stock: 'Stock', sales: 'Sales', shifts: 'Shifts', returns: 'Returns', staff: 'Staff', audit: 'Audit log', reports: 'Sales report' };
 
 const EVENT_TEXT = {
   login: () => 'Signed back in',
@@ -592,13 +592,24 @@ $('twoFaConfirmBtn').addEventListener('click', confirmTwoFa);
 $('twoFaConfirmCode').addEventListener('keydown', (e) => { if (e.key === 'Enter') confirmTwoFa(); });
 
 // ---------------------------------------------------------------------------
-// AUDIT LOG (owners): events that need an owner's eyes, newest first. The
-// download is the record to keep (or show an auditor).
+// AUDIT LOG (owners), two lists for a day, week or month, newest first:
+// - Everyone's activity: what each person did (cashiers and owners alike),
+//   with each person's totals on a card; tapping a card shows only theirs.
+// - Needs a look: events for an owner's eyes (wrong passwords, cash
+//   differences, voids, ...).
+// The downloads are the record to keep (or show an auditor).
 // ---------------------------------------------------------------------------
 
+let auditTab = 'activity';
 let auditPeriod = 'today';
 let auditRows = [];
 let auditPage = 1;
+let activityRows = [];
+let activityPage = 1;
+let activityUser = '';
+let people = [];
+
+const ROLE_NAMES = { owner: 'Owner', cashier: 'Cashier' };
 
 const AUDIT_TEXT = {
   failed_pin_attempt: (a, d) => `Wrong ${d.step === 'code' ? 'authenticator code' : 'password'} for ${a.subject ?? 'an account'}${d.locked ? '. The account is locked for a minute.' : ''}`,
@@ -624,6 +635,33 @@ const auditWho = (a) => [a.actor?.full_name ?? (a.terminal_id === 'sql-editor' ?
   a.approver && a.approver.id !== a.actor?.id ? `approved by ${a.approver.full_name}` : null]
   .filter(Boolean).join(', ') || '—';
 
+// What each recorded action says on Everyone's activity: the shift
+// timeline's wording, plus what the timeline shows from its own records.
+const ACTIVITY_TEXT = {
+  ...EVENT_TEXT,
+  login: () => 'Signed in',
+  session_resumed: () => 'Opened the POS again, still signed in',
+  shift_started: (d) => `Clocked in with ${peso(d.opening_cash)} in the drawer`,
+  shift_ended: (d) => (d.counted_cash == null ? 'Clocked out' : `Clocked out: counted ${peso(d.counted_cash)}, expected ${peso(d.expected_cash)}`),
+  sale_completed: (d, a) => `Sold ${d.item_count ?? ''} item${d.item_count === 1 ? '' : 's'} for ${peso(d.total_amount)} · ${PAY_LABELS[d.payment_method] ?? humanize(d.payment_method ?? '')}${a.subject ? ` (sale ${a.subject})` : ''}`,
+  credit_payment_received: (d, a) => `Took a ${peso(d.amount)} credit payment${a.subject ? ` from ${a.subject}` : ''} in ${PAY_LABELS[d.payment_method] ?? humanize(d.payment_method ?? '')}`,
+};
+const describeActivity = (a) => ACTIVITY_TEXT[a.event_type]?.(a.details ?? {}, a) ?? humanize(a.event_type);
+// A coloured dot beside each action, by kind (the words say it too)
+const KIND = {
+  sale_completed: 'sale', credit_payment_received: 'pay',
+  void_requested: 'void', void_approved: 'void', void_rejected: 'void', void_cancelled: 'void', sale_voided: 'void',
+  shift_started: 'shift', shift_ended: 'shift', login: 'shift', logout: 'shift', screen_locked: 'shift', session_resumed: 'shift',
+  price_changed: 'stock', stock_received: 'stock', stock_quantity_adjusted: 'stock', return_accepted: 'stock',
+  item_added_to_catalog: 'stock', item_details_updated: 'stock', item_archived: 'stock', item_restored: 'stock',
+  staff_added: 'staff', staff_updated: 'staff', staff_deactivated: 'staff', staff_reactivated: 'staff', two_factor_enabled: 'staff', two_factor_disabled: 'staff',
+};
+const lastSeen = (iso) => {
+  if (!iso) return 'Not active yet';
+  if (Date.now() - new Date(iso) < 10 * 60e3) return 'Active now';
+  return `Last active ${new Date(iso).toDateString() === new Date().toDateString() ? clock(iso) : fmtTime(iso)}`;
+};
+
 const auditRow = (a) => `
   <tr>
     <td class="nowrap">${fmtTime(a.client_created_at)}</td>
@@ -632,23 +670,87 @@ const auditRow = (a) => `
     <td class="nowrap">${esc(a.ip_address ?? '—')}</td>
   </tr>`;
 
+const activityRow = (a) => `
+  <tr>
+    <td class="nowrap">${fmtTime(a.client_created_at)}</td>
+    <td>${personCell(a.actor)}</td>
+    <td><span class="act act-${KIND[a.event_type] ?? 'other'}">${esc(describeActivity(a))}</span></td>
+    <td class="nowrap">${esc(a.ip_address ?? '—')}</td>
+  </tr>`;
+
+const PERIOD_WORDS = { today: 'today', week: 'this week', month: 'this month' };
+
+function drawPeople() {
+  $('activityPeople').innerHTML = people.map((p) => `
+    <button type="button" class="person-card${p.id === activityUser ? ' is-on' : ''}" data-user="${esc(p.id)}" aria-pressed="${p.id === activityUser}">
+      <span class="person-card-head">${avatar(p)}<span><strong>${esc(p.full_name)}</strong>
+        <span>${esc(ROLE_NAMES[p.role] ?? p.role)}${p.is_active ? '' : ' (deactivated)'} · ${esc(lastSeen(p.last_seen))}</span></span></span>
+      <span class="person-card-stats">
+        <span><b>${Number(p.sales_count).toLocaleString('en-PH')}</b> sale${Number(p.sales_count) === 1 ? '' : 's'}${Number(p.sales_count) ? ` · ${esc(peso(p.sales_amount))}` : ''}</span>
+        <span><b>${Number(p.payments_count).toLocaleString('en-PH')}</b> credit payment${Number(p.payments_count) === 1 ? '' : 's'}</span>
+        <span><b>${Number(p.actions).toLocaleString('en-PH')}</b> thing${Number(p.actions) === 1 ? '' : 's'} done ${PERIOD_WORDS[auditPeriod]}</span>
+      </span>
+    </button>`).join('');
+  const options = [['', 'Everyone'], ...people.map((p) => [p.id, `${p.full_name} (${ROLE_NAMES[p.role] ?? p.role})`])];
+  $('activityPerson').innerHTML = options.map(([v, label]) => `<option value="${esc(v)}">${esc(label)}</option>`).join('');
+  $('activityPerson').value = activityUser;
+}
+
+function drawAlertCount(n) {
+  $('auditAlertCount').hidden = !n;
+  $('auditAlertCount').textContent = n ? String(n) : '';
+}
+
+function drawActivity(result) {
+  const who = people.find((p) => p.id === activityUser);
+  renderRows('activityTable', activityRows, activityRow,
+    `${who ? `${who.full_name} hasn't done anything` : 'Nothing done'} ${PERIOD_WORDS[auditPeriod]}${$('activitySteps').checked ? '' : ' (besides opening screens)'}.`);
+  showMore('activityMoreBtn', result, activityRows.length);
+}
+
 function drawAudit(result) {
   renderRows('auditTable', auditRows, auditRow, 'Nothing to review in this period.');
   showMore('auditMoreBtn', result, auditRows.length);
 }
 
 const auditFilters = (page) => ({ from: periodStart(auditPeriod), action_type: $('auditType').value, page });
+const activityFilters = (page) => ({ from: periodStart(auditPeriod), user_id: activityUser, steps: $('activitySteps').checked || null, page });
 
 export async function renderAudit() {
   $('auditPeriod').querySelectorAll('[data-period]').forEach((b) => b.classList.toggle('active', b.dataset.period === auditPeriod));
+  $('auditTab').querySelectorAll('[data-tab]').forEach((b) => b.classList.toggle('active', b.dataset.tab === auditTab));
+  $('activityPane').hidden = auditTab !== 'activity';
+  $('alertsPane').hidden = auditTab !== 'alerts';
+  await flushOutbox().catch(() => {}); // include what was done on this device moments ago
+  return auditTab === 'activity' ? loadActivity() : loadAlerts();
+}
+
+async function loadActivity() {
+  tableMessage('activityTable', 'Loading…');
+  showMore('activityMoreBtn', null, 0);
+  try {
+    const result = await withServerAuth(() => fetchActivity(activityFilters(1)));
+    people = result.people ?? [];
+    if (activityUser && !people.some((p) => p.id === activityUser)) activityUser = '';
+    activityRows = rowsOf(result);
+    activityPage = 1;
+    drawPeople();
+    drawAlertCount(result.alerts);
+    drawActivity(result);
+  } catch (err) {
+    tableMessage('activityTable', `Couldn't load. ${err.message}`);
+  }
+}
+
+async function loadAlerts() {
   tableMessage('auditTable', 'Loading…');
   showMore('auditMoreBtn', null, 0);
-  await flushOutbox().catch(() => {}); // include wrong passwords tried on this device moments ago
   try {
     const result = await withServerAuth(() => fetchAuditLog(auditFilters(1)));
     auditRows = rowsOf(result);
     auditPage = 1;
     drawAudit(result);
+    if (!$('auditType').value) drawAlertCount(result.total);
   } catch (err) {
     tableMessage('auditTable', `Couldn't load. ${err.message}`);
   }
@@ -660,7 +762,19 @@ $('auditMoreBtn').addEventListener('click', () => loadMore('auditMoreBtn', async
   auditRows = addPage(auditRows, rowsOf(result));
   drawAudit(result);
 }));
+$('activityMoreBtn').addEventListener('click', () => loadMore('activityMoreBtn', async () => {
+  const result = await withServerAuth(() => fetchActivity(activityFilters(activityPage + 1)));
+  activityPage = result.current_page;
+  activityRows = addPage(activityRows, rowsOf(result));
+  drawActivity(result);
+}));
 
+$('auditTab').addEventListener('click', (e) => {
+  const btn = e.target.closest('[data-tab]');
+  if (!btn || btn.dataset.tab === auditTab) return;
+  auditTab = btn.dataset.tab;
+  renderAudit();
+});
 $('auditPeriod').addEventListener('click', (e) => {
   const btn = e.target.closest('[data-period]');
   if (!btn) return;
@@ -668,10 +782,29 @@ $('auditPeriod').addEventListener('click', (e) => {
   renderAudit();
 });
 $('auditType').addEventListener('change', renderAudit);
+// A person's card (again: everyone), or the same choice from the list
+$('activityPeople').addEventListener('click', (e) => {
+  const card = e.target.closest('[data-user]');
+  if (!card) return;
+  activityUser = card.dataset.user === activityUser ? '' : card.dataset.user;
+  loadActivity();
+});
+$('activityPerson').addEventListener('change', () => {
+  activityUser = $('activityPerson').value;
+  loadActivity();
+});
+$('activitySteps').addEventListener('change', loadActivity);
 
 $('auditDownloadBtn').addEventListener('click', () => {
   downloadCsv(`audit-log-${new Date().toISOString().slice(0, 10)}.csv`, [
     ['Time', 'What happened', 'Who', 'From', 'Kind'],
     ...auditRows.map((a) => [fmtDateTime(a.client_created_at), describeAudit(a), auditWho(a), a.ip_address ?? '', a.action_type]),
+  ]);
+});
+$('activityDownloadBtn').addEventListener('click', () => {
+  const who = people.find((p) => p.id === activityUser)?.full_name.toLowerCase().replace(/[^a-z0-9]+/g, '-') ?? 'everyone';
+  downloadCsv(`activity-${who}-${new Date().toISOString().slice(0, 10)}.csv`, [
+    ['Time', 'Who', 'Role', 'What they did', 'From', 'Kind'],
+    ...activityRows.map((a) => [fmtDateTime(a.client_created_at), a.actor?.full_name ?? '', ROLE_NAMES[a.actor?.role] ?? '', describeActivity(a), a.ip_address ?? '', a.event_type]),
   ]);
 });

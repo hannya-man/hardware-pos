@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="theme-color" content="#08080A">
+<meta name="theme-color" content="#18191C">
 <title>RRC Merchandise POS</title>
 <link rel="icon" type="image/svg+xml" href="/favicon.svg">
 <!-- Installable as an app: Android's "Install app", iPhone's "Add to Home Screen" -->
@@ -16,6 +16,7 @@
 
 <!-- ===================== SIGN IN ===================== -->
 <main id="loginScreen" class="login">
+  <button type="button" id="loginThemeBtn" class="icon-btn login-theme" role="switch" aria-checked="true" aria-label="Dark mode" title="Dark mode"></button>
   <div class="login-card">
     <div class="login-brand">
       <img src="/favicon.svg" alt="" class="brand-mark" width="44" height="44">
@@ -53,7 +54,7 @@
         <span class="avatar" id="sideAv"></span>
         <div class="user-meta"><div class="user-name" id="sideName"></div><div class="user-role" id="sideShift"></div></div>
       </div>
-      <button type="button" id="themeBtn" class="btn btn-ghost btn-block"></button>
+      <button type="button" id="themeBtn" class="theme-switch" role="switch" aria-checked="true"><span data-icon="moon"></span><span class="nav-label">Dark mode</span><span class="switch" aria-hidden="true"></span></button>
       <button type="button" id="logoutBtn" class="btn btn-ghost btn-block" title="Sign out"><span data-icon="logout"></span><span class="nav-label">Sign out</span></button>
     </div>
   </aside>
@@ -289,10 +290,12 @@
             <div class="report-range" aria-live="polite"><strong id="reportRangeName">This week</strong><span id="reportRangeDates"></span></div>
             <button type="button" class="icon-btn" id="reportNext" aria-label="Next week" title="Next week" disabled><span data-icon="next"></span></button>
           </div>
+          <select id="reportStaffPick" class="input input-sm input-auto report-staff" aria-label="Whose sales"><option value="">Everyone</option></select>
           <button type="button" class="btn btn-sm" id="reportDownloadBtn" aria-label="Download" disabled><span data-icon="download"></span><span class="btn-label">Download</span></button>
         </div>
         <p class="note note-warn report-error" id="reportError" hidden><span id="reportErrorText"></span><button type="button" class="btn btn-sm" id="reportRetryBtn">Try again</button></p>
         <div class="stack report-body" id="reportBody">
+          <p class="note report-who" id="reportWho" hidden><span>Only the sales made by <strong id="reportWhoName"></strong></span><button type="button" class="list-link" id="reportWhoAll">Show everyone</button></p>
           <div class="kpi-grid">
             <div class="card kpi"><span class="kpi-label">Total sales</span><span class="kpi-value" id="reportTotal">—</span><span class="kpi-sub" id="reportTotalSub"></span></div>
             <div class="card kpi"><span class="kpi-label">Number of sales</span><span class="kpi-value" id="reportCount">—</span><span class="kpi-sub" id="reportCountSub"></span></div>
@@ -319,8 +322,39 @@
             <div class="stack">
               <div class="card"><div class="card-head"><h2>How customers paid</h2></div><div class="chart" id="reportPayment"></div></div>
               <div class="card"><div class="card-head"><h2>By category</h2></div><ul class="bar-list" id="reportCategories"></ul></div>
-              <div class="card"><div class="card-head"><h2>By staff</h2></div><ul class="bar-list" id="reportStaff"></ul></div>
+              <div class="card"><div class="card-head"><h2>What each person sold</h2></div><ul class="bar-list" id="reportStaff"></ul></div>
             </div>
+          </div>
+          <div class="card">
+            <div class="card-head sku-head">
+              <h2>Revenue by item</h2>
+              <div class="sku-tools">
+                <div class="search"><span data-icon="search" class="icon-lead"></span><input id="reportSkuSearch" class="input input-sm" type="search" placeholder="Search item or SKU" autocomplete="off" aria-label="Search item or SKU"></div>
+                <select id="reportSkuSort" class="input input-sm input-auto" aria-label="Sort by">
+                  <option value="amount">Most revenue</option>
+                  <option value="quantity">Most units sold</option>
+                  <option value="price">Highest average price</option>
+                  <option value="sales">In the most sales</option>
+                  <option value="name">Item name, A to Z</option>
+                  <option value="sku">SKU, A to Z</option>
+                </select>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table" id="reportSkuTable">
+                <thead><tr>
+                  <th data-sort="sku"><button type="button" class="th-sort">SKU</button></th>
+                  <th data-sort="name"><button type="button" class="th-sort">Item</button></th>
+                  <th class="num" data-sort="quantity"><button type="button" class="th-sort">Units sold</button></th>
+                  <th class="num" data-sort="amount"><button type="button" class="th-sort">Revenue</button></th>
+                  <th class="num no-arrow" data-sort="amount"><button type="button" class="th-sort">Share</button></th>
+                  <th class="num" data-sort="price"><button type="button" class="th-sort">Avg. price</button></th>
+                  <th class="num" data-sort="sales"><button type="button" class="th-sort">Sales</button></th>
+                </tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="sku-foot"><span class="muted" id="reportSkuFoot"></span><span hidden><button type="button" class="btn btn-sm" id="reportSkuMore">Show all</button></span></div>
           </div>
           <div class="card" id="reportHoursCard" hidden>
             <div class="card-head"><h2>Busiest times</h2><button type="button" class="btn btn-sm btn-ghost" id="reportHoursTable">Show as table</button></div>
@@ -425,16 +459,41 @@
         </div>
       </section>
 
-      <!-- Audit log: events that need an owner's eyes -->
+      <!-- Audit log: what everyone did, and the events that need an owner's eyes -->
       <section id="viewAudit" class="view stack" hidden>
-        <div class="page-toolbar">
+        <div class="page-toolbar audit-bar">
+          <div class="segmented" id="auditTab">
+            <button type="button" data-tab="activity" class="active">Everyone's activity</button>
+            <button type="button" data-tab="alerts">Needs a look<span class="tab-count" id="auditAlertCount" hidden></span></button>
+          </div>
           <div class="segmented" id="auditPeriod">
             <button type="button" data-period="today" class="active">Today</button>
             <button type="button" data-period="week">This week</button>
             <button type="button" data-period="month">This month</button>
           </div>
         </div>
-        <div class="card">
+
+        <div class="stack" id="activityPane">
+          <div class="people-grid" id="activityPeople"></div>
+          <div class="card">
+            <div class="toolbar">
+              <select id="activityPerson" class="input input-auto" aria-label="Whose activity"><option value="">Everyone</option></select>
+              <label class="toggle"><input type="checkbox" id="activitySteps"> Show every step</label>
+              <div class="toolbar-end">
+                <button type="button" class="btn btn-sm" id="activityDownloadBtn"><span data-icon="download"></span>Download</button>
+              </div>
+            </div>
+            <div class="table-wrap">
+              <table class="table table-anim" id="activityTable">
+                <thead><tr><th>Time</th><th>Who</th><th>What they did</th><th>From</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+            <div class="table-more" hidden><button type="button" class="btn btn-sm" id="activityMoreBtn">Show more</button></div>
+          </div>
+        </div>
+
+        <div class="card" id="alertsPane" hidden>
           <div class="toolbar">
             <select id="auditType" class="input input-auto" aria-label="Kind of event">
               <option value="">Everything</option>

@@ -4,7 +4,7 @@
 // the installed app's title bar) the same colour as the page.
 
 const KEY = 'rrc-theme';
-const BAR = { dark: '#08080A', light: '#F5F4F2' };
+const BAR = { dark: '#18191C', light: '#F5F4F2' };
 
 function saved() {
   try {
