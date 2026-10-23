@@ -9,7 +9,7 @@
   "devDependencies": {
     "@electric-sql/pglite": "0.5.10",
     "bcryptjs": "3.0.3",
-    "dexie": "4.4.6",
+    "dexie": "4.4.7",
     "fake-indexeddb": "6.2.5",
     "jsdom": "30.1.1",
     "qrcode": "1.5.4"
