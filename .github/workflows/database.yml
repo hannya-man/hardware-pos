@@ -27,12 +27,12 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  apply:
+  server-tests:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 22
           cache: npm
@@ -43,6 +43,14 @@ jobs:
         run: |
           npm ci
           node sql.test.mjs
+
+  # On a machine of its own: the packages the tests install never run where the
+  # database password is, so a poisoned one can't take it from a later step.
+  apply:
+    needs: server-tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Check the database secret
         env:

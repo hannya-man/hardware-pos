@@ -9,11 +9,11 @@
     "preview": "vite preview"
   },
   "devDependencies": {
-    "vite": "^8.2.2"
+    "vite": "^8.3.5"
   },
   "dependencies": {
     "bcryptjs": "^3.0.3",
-    "dexie": "^4.4.5",
+    "dexie": "^4.4.7",
     "qrcode": "^1.5.4"
   }
 }

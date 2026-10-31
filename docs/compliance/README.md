@@ -68,7 +68,10 @@ runs on in the store, and the people who use and run it.
   night, encrypted.
 - **Change control.** Every change runs the full test suite; nothing is
   published unless it passes. Packages with known high-severity
-  vulnerabilities block a release, and Dependabot proposes updates weekly.
+  vulnerabilities block a release, and Dependabot proposes updates weekly,
+  each release a week old first. Packages never run install scripts, GitHub
+  Actions are pinned to exact commits, and the database password is only on
+  a machine that runs no packages.
 
 ## Steps left for the store
 

@@ -1,16 +1,25 @@
 # Weekly pull requests for package and GitHub Actions updates, including
-# security fixes. Each one runs the tests before anyone merges it.
+# security fixes. Each one runs the tests before anyone merges it. A new
+# release waits a week before it's proposed, as the npm worms of 2025-26 were
+# caught and pulled within days; security fixes don't wait. The workflows use
+# each action at an exact commit, and these pull requests move them on.
 version: 2
 updates:
   - package-ecosystem: npm
     directory: /caidic-pos-frontend
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: npm
     directory: /tests
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
