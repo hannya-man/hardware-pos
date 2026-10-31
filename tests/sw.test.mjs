@@ -63,6 +63,7 @@ online = false;
 check('offline: the page from the saved copy', (await visit(SCOPE, { mode: 'navigate' })) === '<html>app v2</html>');
 check('offline: files from the saved copy', (await visit(`${SCOPE}assets/index-1.js?v=1`)) === 'js v1');
 check('offline: another page address opens the app', (await visit(`${SCOPE}index.html`, { mode: 'navigate' })) === '<html>app v2</html>');
+check('offline: the customer screen never opens the till instead', (await visit(`${SCOPE}customer.html`, { mode: 'navigate' })) === 'error');
 check('offline: an unknown file is a network error', (await visit(`${SCOPE}assets/missing.js`)) === 'error');
 
 online = true;

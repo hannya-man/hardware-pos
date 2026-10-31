@@ -2,16 +2,15 @@
 // dialogs, toasts, and the item picker used by every search box.
 
 import { searchProducts, findExactProduct } from './input-handler.js';
+import { esc, peso, qty } from './format.js';
 
+export { esc, peso, qty };
 export const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------------------
 // Formatting
 // ---------------------------------------------------------------------------
 
-const money = new Intl.NumberFormat('en-PH', { style: 'currency', currency: 'PHP' });
-export const peso = (n) => money.format(Number(n) || 0);
-export const qty = (n) => Number(n || 0).toLocaleString('en-PH', { maximumFractionDigits: 3 });
 export const round2 = (n) => Math.round(n * 100) / 100;
 export const round3 = (n) => Math.round(n * 1000) / 1000;
 export const fmtTime = (iso) => (iso ? new Date(iso).toLocaleString('en-PH', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : '—');
@@ -19,12 +18,6 @@ export const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString('en-PH',
 export const fmtDateTime = (when) => new Date(when).toLocaleString('en-PH', { dateStyle: 'medium', timeStyle: 'short' }); // on printed slips
 export const initials = (name = '') => name.split(/\s+/).filter(Boolean).map((w) => w[0]).slice(0, 2).join('').toUpperCase();
 export const humanize = (s = '') => s.replace(/_/g, ' ').replace(/^./, (c) => c.toUpperCase());
-
-// Every value from the catalog or a person goes through this before it's
-// put into HTML. Product names like `Flat Bar 3/16" x 3/4"` contain quotes.
-export function esc(value) {
-  return String(value ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
 
 // Digits and a single decimal point only. Amount fields use type="text"
 // with this instead of type="number", which is unreliable on touch keyboards.
@@ -63,6 +56,7 @@ const ICONS = {
   minus: '<path d="M5 12h14"/>',
   trash: '<path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/>',
   print: '<path d="M6 9V3h12v6"/><rect x="3" y="9" width="18" height="8" rx="2"/><path d="M6 14h12v7H6z"/>',
+  monitor: '<rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/>',
   back: '<path d="M19 12H5M12 19l-7-7 7-7"/>',
   download: '<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
   backspace: '<path d="M21 5H9l-6 7 6 7h12a1 1 0 0 0 1-1V6a1 1 0 0 0-1-1Z"/><path d="m16 9-5 6M11 9l5 6"/>',

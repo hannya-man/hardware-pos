@@ -511,7 +511,7 @@ export function flushOutbox(options = {}) {
 // until Sync now gets them through or an owner looks into it.
 let onUnsynced = null;
 async function reportUnsynced() {
-  onUnsynced?.(await db.outbox_queue.where('status').equals('failed').count());
+  onUnsynced?.(await db.outbox_queue.where('status').equals('failed').primaryKeys());
 }
 
 async function pushPending({ onNeedsProvisioning } = {}) {

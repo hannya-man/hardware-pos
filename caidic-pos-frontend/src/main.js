@@ -40,7 +40,7 @@ const NAV = [
   ] },
   { section: 'Daily work', items: [
     { key: 'billing', label: 'Sell', icon: 'cart', roles: EVERYONE, render: renderBilling,
-      help: 'Scan, search, or tap items to add them, then Charge. Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready.' },
+      help: 'Scan, search, or tap items to add them, then Charge. Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready. With a second monitor facing the customer, the screen button beside the order opens the customer screen there.' },
     { key: 'credit', label: 'Credit (utang)', icon: 'wallet', roles: EVERYONE, render: renderCredit,
       help: 'Customers who bought on credit and how much each one still owes. Record a payment when they pay. If they hand over more cash than they owe, the balance is paid off and the change to give back is shown.' },
     { key: 'materialRequests', label: 'Pick lists', icon: 'clipboard', roles: EVERYONE, render: renderMaterialRequests,
@@ -105,9 +105,13 @@ async function boot() {
       online = now;
       drawStatus();
     },
-    onUnsynced: (count) => {
-      if (count > unsynced) toast(`${count} record${count === 1 ? '' : 's'} couldn't be saved on the server. Tap Sync now; if it stays, tell an owner.`, 'error');
-      unsynced = count;
+    onUnsynced: async (ids) => {
+      // Once per record: not again after a reload, or a Sync now that didn't get it through.
+      // The status pill keeps showing the count meanwhile.
+      const warned = await getSyncMeta('unsynced_warned', []);
+      if (ids.some((id) => !warned.includes(id))) toast(`${ids.length} record${ids.length === 1 ? '' : 's'} couldn't be saved on the server. Tap Sync now; if it stays, tell an owner.`, 'error');
+      await setSyncMeta('unsynced_warned', await db.outbox_queue.where('id').anyOf([...warned, ...ids]).primaryKeys());
+      unsynced = ids.length;
       drawStatus();
     },
     onNeedsProvisioning: () => askForTerminalKey({ fromSync: true }),

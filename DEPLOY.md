@@ -152,6 +152,12 @@ uses the same Supabase project as the published site.
   nothing). **Run workflow** on it does the same by hand. Without the
   `SUPABASE_DB_URL` secret, run the same files in the SQL Editor instead, in
   that order.
+- **Supabase's GitHub integration** (its "Supabase Preview" check) isn't
+  needed: the workflow above updates the database. The workflow records every
+  migration file in Supabase's migration history, so the integration doesn't
+  replay them and fail on tables that already exist. If the integration stays
+  connected, turn off its **Deploy to production**, so only the tested workflow
+  changes the live database.
 - **The store's time zone** for "today" and "this week" is set in
   `pos.store_timezone()` (Asia/Manila).
 - **ISO standards.** What the system does for ISO/IEC 27001, 27017, 22301,

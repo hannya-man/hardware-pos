@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#18191C">
+<title>RRC Merchandise · Your order</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg">
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<!-- The customer's screen, on a second monitor facing the counter. The Sell
+     screen's monitor button opens it; customer.js shows what it's sent. -->
+<body class="cust">
+
+<header class="cust-head">
+  <img src="/favicon.svg" alt="" width="40" height="40">
+  <span class="cust-brand"><strong>RRC</strong> Merchandise</span>
+</header>
+
+<main class="cust-main">
+  <section class="cust-center" id="custWelcome">
+    <h1>Welcome!</h1>
+    <p>Your items will show here as they're rung up.</p>
+  </section>
+
+  <section class="cust-order" id="custOrder" hidden>
+    <div class="cust-list">
+      <div class="cust-list-head"><h2>Your order</h2><span id="custCount"></span></div>
+      <ol class="cust-lines" id="custLines"></ol>
+    </div>
+    <aside class="cust-sum">
+      <span class="cust-sum-label">Total</span>
+      <strong class="cust-total" id="custTotal"></strong>
+      <div class="cust-pay" id="custPay"></div>
+    </aside>
+  </section>
+
+  <section class="cust-center" id="custThanks" hidden>
+    <h1>Thank you!</h1>
+    <p id="custThanksNote"></p>
+    <span>Please come again.</span>
+  </section>
+</main>
+
+<button type="button" class="btn btn-sm cust-full" id="custFullBtn" hidden>Full screen</button>
+
+<script type="module" src="/src/customer.js"></script>
+</body>
+</html>

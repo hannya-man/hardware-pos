@@ -32,8 +32,9 @@ async function fromCache(request) {
   const cache = await caches.open(CACHE);
   const saved = await cache.match(request, { ignoreSearch: true });
   if (saved) return saved;
-  // Any page address in the app falls back to the app's page.
-  if (request.mode === 'navigate') {
+  // Any page address in the app falls back to the app's page, except the
+  // customer's screen: the till must never open on the monitor customers face.
+  if (request.mode === 'navigate' && !new URL(request.url).pathname.endsWith('/customer.html')) {
     const page = await cache.match(self.registration.scope);
     if (page) return page;
   }

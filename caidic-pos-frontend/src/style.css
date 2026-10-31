@@ -376,7 +376,9 @@ input.input::-webkit-search-cancel-button {
 .card-head-start { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .card-head-start .icon-btn { margin-left: -6px; }
 
-.stack { display: grid; gap: 20px; align-content: start; }
+/* minmax(0, 1fr): as wide as the screen allows, so something wide inside (a
+   table, a long name in a picker) scrolls or wraps instead of widening the page */
+.stack { display: grid; grid-template-columns: minmax(0, 1fr); gap: 20px; align-content: start; }
 .narrow { max-width: 640px; }
 .grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; align-items: start; }
 
@@ -438,7 +440,7 @@ input.input::-webkit-search-cancel-button {
 .stat-value { font: 600 26px/1.15 var(--font-display); letter-spacing: -0.02em; font-variant-numeric: tabular-nums; }
 .stat-sub { font-size: 12.5px; color: var(--text-3); }
 
-.plain-list { display: grid; margin: 0; padding: 0; list-style: none; }
+.plain-list { display: grid; grid-template-columns: minmax(0, 1fr); margin: 0; padding: 0; list-style: none; }
 .plain-list li { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); }
 .plain-list li:last-child { border-bottom: 0; }
 .plain-list li > span:first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -695,6 +697,9 @@ input.input::-webkit-search-cancel-button {
 }
 .order-head { display: flex; align-items: baseline; justify-content: space-between; padding: 18px 20px 14px; border-bottom: 1px solid var(--line); }
 .order-head h2 { font: 600 16px var(--font-display); }
+/* The customer screen's button at the far right, beside the item count */
+.order-head #orderCount { margin-left: auto; }
+#customerScreenBtn { align-self: center; margin: -8px -8px -8px 6px; }
 .order-lines { flex: 1; min-height: 140px; padding: 0 20px; overflow-y: auto; }
 .line {
   display: grid; grid-template-columns: minmax(0, 1fr) auto; grid-template-areas: "info total" "qty remove";
@@ -1065,10 +1070,55 @@ th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one 
 .plain-list li:nth-child(4), .table-anim tbody tr:nth-child(4) { animation-delay: 90ms; }
 .plain-list li:nth-child(n + 5), .table-anim tbody tr:nth-child(n + 5) { animation-delay: 120ms; }
 
+/* ---------- The customer's screen (customer.html, customer.js) ----------
+   A monitor facing the counter, read from a step or two away: type that
+   grows with the screen, the order on the left, the total on the right. */
+.cust { display: flex; flex-direction: column; height: 100vh; height: 100dvh; overflow: hidden; font-size: clamp(16px, max(1.6vw, 1.2vh), 24px); }
+.cust-head { display: flex; align-items: center; gap: 0.6em; padding: 2.5vh 3vw; border-bottom: 1px solid var(--line); }
+.cust-head img { width: 1.9em; height: 1.9em; }
+.cust-brand { font: 500 1.25em var(--font-display); color: var(--text-2); }
+.cust-brand strong { font-weight: 800; color: var(--text); }
+.cust-main { display: flex; flex: 1; min-height: 0; }
+.cust-center { display: grid; place-content: center; justify-items: center; gap: 0.5em; flex: 1; padding: 4vh 4vw; text-align: center; animation: rise 0.4s var(--ease-out); }
+.cust-center h1 { font: 700 clamp(40px, 6vw, 96px)/1.05 var(--font-display); letter-spacing: -0.02em; }
+.cust-center p { font-size: 1.4em; color: var(--text-2); font-variant-numeric: tabular-nums; }
+.cust-center span { color: var(--text-3); }
+
+.cust-order { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(0, 1fr); flex: 1; min-height: 0; }
+.cust-list { display: flex; flex-direction: column; min-height: 0; padding: 3vh 2.4vw 0; }
+.cust-list-head { display: flex; align-items: baseline; justify-content: space-between; padding: 0 0.6em 1.5vh; border-bottom: 1px solid var(--line); color: var(--text-3); }
+.cust-list-head h2 { font: 600 1.1em var(--font-display); color: var(--text-2); }
+.cust-lines { flex: 1; min-height: 0; margin: 0; padding: 0; overflow-y: auto; list-style: none; scrollbar-width: none; }
+.cust-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.15em 1em; padding: 0.8em 0.6em; border-bottom: 1px solid var(--line); border-radius: var(--radius); }
+.cust-line-name { font-size: 1.15em; font-weight: 600; line-height: 1.3; }
+.cust-line-total { font-size: 1.15em; font-weight: 650; font-variant-numeric: tabular-nums; }
+.cust-line-sub { grid-column: 1 / -1; color: var(--text-3); font-variant-numeric: tabular-nums; }
+/* What was just rung up lights up for a moment */
+.cust-line.is-new { animation: cust-flash 1.6s var(--ease-out); }
+@keyframes cust-flash { from { background: var(--accent-soft); } }
+
+.cust-sum { display: flex; flex-direction: column; justify-content: center; gap: 0.3em; padding: 4vh 3vw; border-left: 1px solid var(--line); background: var(--surface); }
+.cust-sum-label { font-size: 1.2em; color: var(--text-2); }
+.cust-total { font: 700 clamp(44px, max(6.5vw, 4.5vh), 120px)/1.05 var(--font-display); letter-spacing: -0.03em; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.cust-pay { display: grid; gap: 0.5em; margin-top: 3vh; }
+.cust-pay:empty { display: none; }
+.cust-pay div { display: flex; justify-content: space-between; align-items: baseline; gap: 1em; padding-top: 0.5em; border-top: 1px solid var(--line); font-size: 1.15em; }
+.cust-pay span { color: var(--text-2); }
+.cust-pay b { font-weight: 650; font-variant-numeric: tabular-nums; }
+.cust-pay .cust-change b { font-size: 1.4em; color: var(--ok); }
+/* For whoever sets the screen up; F11 does the same */
+.cust-full { position: fixed; right: 16px; bottom: 16px; opacity: 0.6; }
+.cust-full:hover { opacity: 1; }
+/* A monitor stood upright, or a small window: the total goes under the order */
+@media (max-aspect-ratio: 1/1), (max-width: 760px) {
+  .cust-order { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) auto; }
+  .cust-sum { padding: 3vh 4vw; border-top: 1px solid var(--line); border-left: 0; }
+}
+
 /* ---------- Smaller screens ---------- */
 @media (max-width: 1200px) {
   .billing { grid-template-columns: minmax(0, 1fr) 340px; }
-  .kpi-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-grid, .grid-3 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 1100px) {
   .report-grid { grid-template-columns: minmax(0, 1fr); }
@@ -1089,15 +1139,122 @@ th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one 
   .order { max-height: calc(100vh - var(--topbar-h) - 40px); }
   .billing { grid-template-columns: minmax(0, 1fr) 300px; gap: 16px; }
   .product-grid { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
-  .grid-3, .stat-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .stat-row-4 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
+/* ---------- Tablets and phones: one card per table row ----------
+   Below 1200px wide (a tablet either way up, a phone) a table's columns get
+   too narrow to read, so each row becomes a card, with the columns placed for
+   each table below. */
+@media (max-width: 1200px) {
+  .table-wrap { overflow: visible; }
+  .table-more { padding-top: 28px; }
+  .table thead { display: none; }
+  .table, .table tbody { display: block; }
+  .table tr {
+    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 12px;
+    padding: 12px 20px; border-bottom: 1px solid var(--line);
+  }
+  .table tbody tr:last-child { border-bottom: 0; }
+  .table td, .table td:first-child, .table td:last-child { min-width: 0; padding: 0; border: 0; }
+  .table .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
+  .table .actions > * + * { margin-left: 0; }
+  .table .empty-row { display: block; }
+  .table .empty-row td { display: block; padding: 32px 16px; }
+
+  #salesTable tr { grid-template-areas: "items total" "pay total" "time staff"; }
+  #salesTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); }
+  #salesTable td:nth-child(2) { grid-area: items; font-weight: 500; }
+  #salesTable td:nth-child(3) { grid-area: pay; font-size: 13px; color: var(--text-2); }
+  #salesTable td:nth-child(4) { grid-area: staff; font-size: 12.5px; color: var(--text-3); text-align: right; }
+  #salesTable td:nth-child(5) { grid-area: total; align-self: start; }
+
+  /* The cash difference on the left: in the narrow right-hand column it would squeeze the name */
+  #shiftsTable tr { grid-template-areas: "staff status" "in sales" "out sales" "diff hours"; }
+  #shiftsTable td:nth-child(1) { grid-area: staff; }
+  #shiftsTable td:nth-child(2) { grid-area: in; }
+  #shiftsTable td:nth-child(3) { grid-area: out; }
+  #shiftsTable td:nth-child(4) { grid-area: hours; }
+  #shiftsTable td:nth-child(5) { grid-area: sales; }
+  #shiftsTable td:nth-child(6) { grid-area: diff; text-align: left; white-space: normal; }
+  #shiftsTable td:nth-child(7) { grid-area: status; text-align: right; }
+  #shiftsTable td:nth-child(n + 2):nth-child(-n + 4) { font-size: 13px; color: var(--text-2); }
+  #shiftsTable td:nth-child(n + 2):nth-child(-n + 4)::before, #shiftsTable td:nth-child(6)::before { color: var(--text-3); font-weight: 400; }
+  #shiftsTable td:nth-child(2)::before { content: "Clocked in "; }
+  #shiftsTable td:nth-child(3)::before { content: "Clocked out "; }
+  #shiftsTable td:nth-child(4)::before { content: "Hours "; }
+  #shiftsTable td:nth-child(6)::before { content: "Cash difference: "; }
+
+  #usersTable tr { grid-template-areas: "name role" "actions actions"; }
+  #usersTable td:nth-child(1) { grid-area: name; }
+  #usersTable td:nth-child(2) { grid-area: role; font-size: 13px; color: var(--text-2); text-align: right; }
+  #usersTable td:nth-child(3) { grid-area: actions; padding-top: 6px; }
+
+  #auditTable tr { grid-template-areas: "what what" "who who" "time from"; }
+  #auditTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); }
+  #auditTable td:nth-child(2) { grid-area: what; font-weight: 500; }
+  #auditTable td:nth-child(3) { grid-area: who; font-size: 13px; color: var(--text-2); }
+  #auditTable td:nth-child(4) { grid-area: from; font-size: 12.5px; color: var(--text-3); text-align: right; }
+
+  #activityTable tr { grid-template-areas: "what what" "who time"; }
+  #activityTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); text-align: right; }
+  #activityTable td:nth-child(2) { grid-area: who; font-size: 13px; color: var(--text-2); }
+  #activityTable td:nth-child(3) { grid-area: what; font-weight: 500; }
+  #activityTable td:nth-child(4) { display: none; }
+  #activityTable .avatar { width: 22px; height: 22px; font-size: 9.5px; }
+
+  #reportSkuTable tr { grid-template-areas: "name amount" "sku share" "units price"; row-gap: 4px; }
+  #reportSkuTable td:nth-child(1) { grid-area: sku; }
+  #reportSkuTable td:nth-child(2) { grid-area: name; }
+  #reportSkuTable td:nth-child(3) { grid-area: units; font-size: 13px; color: var(--text-2); text-align: left; }
+  #reportSkuTable td:nth-child(3)::before { content: "Units sold "; color: var(--text-3); }
+  #reportSkuTable td:nth-child(4) { grid-area: amount; align-self: start; }
+  #reportSkuTable td:nth-child(5) { grid-area: share; }
+  #reportSkuTable td:nth-child(6) { grid-area: price; font-size: 13px; color: var(--text-2); }
+  #reportSkuTable td:nth-child(6)::before { content: "Avg. "; color: var(--text-3); }
+  #reportSkuTable td:nth-child(7) { display: none; }
+
+  #creditTable tr { grid-template-areas: "name owes" "phone actions" "last actions"; }
+  #creditTable td:nth-child(1) { grid-area: name; }
+  #creditTable td:nth-child(2) { grid-area: phone; font-size: 13px; color: var(--text-2); }
+  #creditTable td:nth-child(3) { grid-area: last; font-size: 12.5px; color: var(--text-3); }
+  #creditTable td:nth-child(3)::before { content: "Last credit sale "; }
+  #creditTable td:nth-child(4) { grid-area: owes; }
+  #creditTable td:nth-child(5) { grid-area: actions; }
+
+  #stockTable tr { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: "item item price" "store wh value" "status status actions"; row-gap: 8px; }
+  #stockTable td:nth-child(1) { grid-area: item; }
+  #stockTable td:nth-child(2) { grid-area: price; align-self: start; }
+  #stockTable td:nth-child(3) { grid-area: store; text-align: left; }
+  #stockTable td:nth-child(4) { grid-area: wh; text-align: left; }
+  #stockTable td:nth-child(5) { grid-area: value; }
+  #stockTable td:nth-child(6) { grid-area: status; }
+  #stockTable td:nth-child(7) { grid-area: actions; }
+  #stockTable td:nth-child(n + 3):nth-child(-n + 5)::before { display: block; font-size: 12px; color: var(--text-3); }
+  #stockTable td:nth-child(3)::before { content: "Store"; }
+  #stockTable td:nth-child(4)::before { content: "Warehouse"; }
+  #stockTable td:nth-child(5)::before { content: "Value"; }
+
+  #materialRequestsTable tr { grid-template-areas: "for time" "items items" "note note" "actions actions"; }
+  #materialRequestsTable td:nth-child(1) { grid-area: time; align-self: start; font-size: 12.5px; color: var(--text-3); text-align: right; }
+  #materialRequestsTable td:nth-child(2) { grid-area: for; }
+  #materialRequestsTable td:nth-child(3) { grid-area: items; padding-top: 4px; }
+  #materialRequestsTable td:nth-child(4) { grid-area: note; font-size: 13px; color: var(--text-2); }
+  #materialRequestsTable td:nth-child(4)::before { content: "Note: "; color: var(--text-3); }
+  #materialRequestsTable td:nth-child(4):empty { display: none; }
+  #materialRequestsTable td:nth-child(5) { grid-area: actions; padding-top: 6px; }
+}
+/* With a mouse (a laptop at 125% zoom, say), the row under it lights up as one card */
+@media (max-width: 1200px) and (hover: hover) {
+  .table tbody tr:hover td { background: none; }
+  .table tbody tr:not(.empty-row):hover { background: var(--row-hover); }
+}
+
 /* ---------- Phones (Android and iPhone) ----------
    One column, nothing cut off at the edge, and nothing smaller than a
    fingertip. The menu slides in from the left (main.js setMenu); on the Sell
-   screen the order opens from a bar at the bottom (billing.js); each table
-   row becomes a card; dialogs rise from the bottom with their buttons always
-   in reach. Text boxes use 16px text: with less, an iPhone zooms the page in
-   whenever one is tapped. */
+   screen the order opens from a bar at the bottom (billing.js); dialogs rise
+   from the bottom with their buttons always in reach. Text boxes use 16px
+   text: with less, an iPhone zooms the page in whenever one is tapped. */
 .menu-btn, .order-close, .cart-bar, .nav-backdrop, .order-backdrop { display: none; }
 @keyframes bump { 45% { transform: scale(1.3); } }
 @keyframes sheet-up { from { opacity: 0; transform: translateY(40px); } }
@@ -1224,71 +1381,10 @@ th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one 
   .donut-legend { flex-basis: 100%; }
   .heat-top { flex-basis: 100%; margin: 4px 0 0; }
 
-  /* Tables: one card per row, with the columns placed for each table below */
-  .table-wrap { margin: 0 -16px -16px; overflow: visible; }
-  .table-more { padding-top: 28px; }
-  .table thead { display: none; }
-  .table, .table tbody { display: block; }
-  .table tr {
-    display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 3px 12px;
-    padding: 12px 16px; border-bottom: 1px solid var(--line);
-  }
-  .table tbody tr:last-child { border-bottom: 0; }
-  .table td, .table td:first-child, .table td:last-child { min-width: 0; padding: 0; border: 0; }
-  .table .actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
-  .table .actions > * + * { margin-left: 0; }
-  .table .empty-row { display: block; }
-  .table .empty-row td { display: block; padding: 32px 16px; }
+  /* Tables: the row cards reach the card's edges (see Tablets and phones) */
+  .table-wrap { margin: 0 -16px -16px; }
+  .table tr { padding: 12px 16px; }
 
-  #salesTable tr { grid-template-areas: "items total" "pay total" "time staff"; }
-  #salesTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); }
-  #salesTable td:nth-child(2) { grid-area: items; font-weight: 500; }
-  #salesTable td:nth-child(3) { grid-area: pay; font-size: 13px; color: var(--text-2); }
-  #salesTable td:nth-child(4) { grid-area: staff; font-size: 12.5px; color: var(--text-3); text-align: right; }
-  #salesTable td:nth-child(5) { grid-area: total; align-self: start; }
-
-  #shiftsTable tr { grid-template-areas: "staff status" "in sales" "out sales" "hours diff"; }
-  #shiftsTable td:nth-child(1) { grid-area: staff; }
-  #shiftsTable td:nth-child(2) { grid-area: in; }
-  #shiftsTable td:nth-child(3) { grid-area: out; }
-  #shiftsTable td:nth-child(4) { grid-area: hours; text-align: left; }
-  #shiftsTable td:nth-child(5) { grid-area: sales; }
-  #shiftsTable td:nth-child(6) { grid-area: diff; }
-  #shiftsTable td:nth-child(7) { grid-area: status; text-align: right; }
-  #shiftsTable td:nth-child(n + 2):nth-child(-n + 4) { font-size: 13px; color: var(--text-2); }
-  #shiftsTable td:nth-child(n + 2):nth-child(-n + 4)::before, #shiftsTable td:nth-child(6)::before { color: var(--text-3); font-weight: 400; }
-  #shiftsTable td:nth-child(2)::before { content: "Clocked in "; }
-  #shiftsTable td:nth-child(3)::before { content: "Clocked out "; }
-  #shiftsTable td:nth-child(4)::before { content: "Hours "; }
-  #shiftsTable td:nth-child(6)::before { content: "Cash difference: "; }
-
-  #usersTable tr { grid-template-areas: "name role" "actions actions"; }
-  #usersTable td:nth-child(1) { grid-area: name; }
-  #usersTable td:nth-child(2) { grid-area: role; font-size: 13px; color: var(--text-2); text-align: right; }
-  #usersTable td:nth-child(3) { grid-area: actions; padding-top: 6px; }
-
-  #auditTable tr { grid-template-areas: "what what" "who who" "time from"; }
-  #auditTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); }
-  #auditTable td:nth-child(2) { grid-area: what; font-weight: 500; }
-  #auditTable td:nth-child(3) { grid-area: who; font-size: 13px; color: var(--text-2); }
-  #auditTable td:nth-child(4) { grid-area: from; font-size: 12.5px; color: var(--text-3); text-align: right; }
-
-  #activityTable tr { grid-template-areas: "what what" "who time"; }
-  #reportSkuTable tr { grid-template-areas: "name amount" "sku share" "units price"; row-gap: 4px; }
-  #reportSkuTable td:nth-child(1) { grid-area: sku; }
-  #reportSkuTable td:nth-child(2) { grid-area: name; }
-  #reportSkuTable td:nth-child(3) { grid-area: units; font-size: 13px; color: var(--text-2); text-align: left; }
-  #reportSkuTable td:nth-child(3)::before { content: "Units sold "; color: var(--text-3); }
-  #reportSkuTable td:nth-child(4) { grid-area: amount; align-self: start; }
-  #reportSkuTable td:nth-child(5) { grid-area: share; }
-  #reportSkuTable td:nth-child(6) { grid-area: price; font-size: 13px; color: var(--text-2); }
-  #reportSkuTable td:nth-child(6)::before { content: "Avg. "; color: var(--text-3); }
-  #reportSkuTable td:nth-child(7) { display: none; }
-  #activityTable td:nth-child(1) { grid-area: time; font-size: 12.5px; color: var(--text-3); text-align: right; }
-  #activityTable td:nth-child(2) { grid-area: who; font-size: 13px; color: var(--text-2); }
-  #activityTable td:nth-child(3) { grid-area: what; font-weight: 500; }
-  #activityTable td:nth-child(4) { display: none; }
-  #activityTable .avatar { width: 22px; height: 22px; font-size: 9.5px; }
   /* The people side by side, swiped sideways */
   .people-grid {
     grid-template-columns: none; grid-auto-flow: column; grid-auto-columns: minmax(236px, 80%);
@@ -1296,36 +1392,6 @@ th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one 
   }
   .people-grid::-webkit-scrollbar { display: none; }
   .person-card { scroll-snap-align: start; }
-
-  #creditTable tr { grid-template-areas: "name owes" "phone actions" "last actions"; }
-  #creditTable td:nth-child(1) { grid-area: name; }
-  #creditTable td:nth-child(2) { grid-area: phone; font-size: 13px; color: var(--text-2); }
-  #creditTable td:nth-child(3) { grid-area: last; font-size: 12.5px; color: var(--text-3); }
-  #creditTable td:nth-child(3)::before { content: "Last credit sale "; }
-  #creditTable td:nth-child(4) { grid-area: owes; }
-  #creditTable td:nth-child(5) { grid-area: actions; }
-
-  #stockTable tr { grid-template-columns: repeat(3, minmax(0, 1fr)); grid-template-areas: "item item price" "store wh value" "status status actions"; row-gap: 8px; }
-  #stockTable td:nth-child(1) { grid-area: item; }
-  #stockTable td:nth-child(2) { grid-area: price; align-self: start; }
-  #stockTable td:nth-child(3) { grid-area: store; text-align: left; }
-  #stockTable td:nth-child(4) { grid-area: wh; text-align: left; }
-  #stockTable td:nth-child(5) { grid-area: value; }
-  #stockTable td:nth-child(6) { grid-area: status; }
-  #stockTable td:nth-child(7) { grid-area: actions; }
-  #stockTable td:nth-child(n + 3):nth-child(-n + 5)::before { display: block; font-size: 12px; color: var(--text-3); }
-  #stockTable td:nth-child(3)::before { content: "Store"; }
-  #stockTable td:nth-child(4)::before { content: "Warehouse"; }
-  #stockTable td:nth-child(5)::before { content: "Value"; }
-
-  #materialRequestsTable tr { grid-template-areas: "for time" "items items" "note note" "actions actions"; }
-  #materialRequestsTable td:nth-child(1) { grid-area: time; align-self: start; font-size: 12.5px; color: var(--text-3); text-align: right; }
-  #materialRequestsTable td:nth-child(2) { grid-area: for; }
-  #materialRequestsTable td:nth-child(3) { grid-area: items; padding-top: 4px; }
-  #materialRequestsTable td:nth-child(4) { grid-area: note; font-size: 13px; color: var(--text-2); }
-  #materialRequestsTable td:nth-child(4)::before { content: "Note: "; color: var(--text-3); }
-  #materialRequestsTable td:nth-child(4):empty { display: none; }
-  #materialRequestsTable td:nth-child(5) { grid-area: actions; padding-top: 6px; }
 
   /* Dialogs rise from the bottom; their buttons stay in reach while the rest scrolls */
   .overlay { place-items: end stretch; padding: 0; }
@@ -1390,6 +1456,8 @@ th.no-arrow .th-sort::after { content: none; } /* Share sorts like Revenue; one 
   .billing.order-open .order-backdrop { opacity: 1; pointer-events: auto; }
   .order-head { justify-content: flex-start; align-items: center; gap: 8px; padding: 10px 10px 10px 20px; }
   .order-close { display: inline-grid; margin-left: auto; }
+  .order-head #orderCount { margin-left: 0; }
+  #customerScreenBtn { display: none; } /* a phone has no second monitor to put it on */
   .order-lines { overscroll-behavior: contain; }
   .order-foot { padding: 14px 16px calc(16px + env(safe-area-inset-bottom)); }
   .stepper { height: 40px; }

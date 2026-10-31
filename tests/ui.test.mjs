@@ -34,6 +34,10 @@ console.warn = (...args) => {
   warn(...args);
 };
 
+// Node's BroadcastChannel (the customer screen's channel) makes its message
+// events from Node's own Event: loaded now, before jsdom's Event replaces it.
+void MessageEvent;
+
 function openBrowser() {
   const dom = new JSDOM(html, { url: 'https://hannya-man.github.io/hardware-pos/', pretendToBeVisual: true });
   const { window } = dom;
@@ -142,6 +146,18 @@ try {
   const cashierMenu = [...$('navItems').querySelectorAll('[data-view]')].map((b) => b.dataset.view).join();
   check('cashier sees only the cashier menu', cashierMenu === 'billing,credit,materialRequests', cashierMenu);
 
+  // The customer's screen (customer.js) listens on the same channel; it opens
+  // in a window of its own from the order's monitor button.
+  const customerScreen = new BroadcastChannel('rrc-customer-screen');
+  const shown = [];
+  customerScreen.onmessage = (e) => shown.push(e.data);
+  const opened = [];
+  window.open = (url) => { opened.push(url); return { moveTo() {}, resizeTo() {} }; };
+  $('customerScreenBtn').click();
+  check('the monitor button opens the customer screen', opened.join() === './customer.html', opened);
+  customerScreen.postMessage('hello');
+  await waitFor('the Sell screen to answer the customer screen', () => shown.some((m) => Array.isArray(m?.lines)));
+
   // A cash sale: two items, one tapped twice.
   const tiles = await waitFor('items on the Sell screen', () => { const t = $('grid').querySelectorAll('[data-id]'); return t.length > 100 && t; });
   tiles[0].click();
@@ -154,13 +170,18 @@ try {
   check('the order bar shows the count and the total', !$('cartBar').classList.contains('is-empty')
     && $('cartBarCount').textContent === '2' && $('cartBarTotal').textContent === $('grandTotal').textContent, $('cartBar').textContent);
   check('items in the order show how many', tiles[0].dataset.qty === '2' && tiles[5].dataset.qty === '1' && !('qty' in tiles[1].dataset));
+  const onScreen = await waitFor('the order on the customer screen', () => shown.findLast((m) => m?.lines?.length === 2 && m.lines[0].quantity === 2));
+  check('the customer screen gets each line and the total', onScreen.payment === null
+    && onScreen.total === onScreen.lines.reduce((sum, l) => sum + l.total, 0) && onScreen.lines[0].name.includes('=HYPERLINK('), onScreen);
   $('cartBarOpen').click();
   check('the order opens from the bar', $('viewBilling').classList.contains('order-open') && $('cartBarOpen').getAttribute('aria-expanded') === 'true');
   $('chargeBtn').click();
   await waitFor('checkout', () => !$('checkoutOverlay').hidden);
   type($('checkoutCash'), '5000');
+  await waitFor('the cash handed over, on the customer screen', () => shown.at(-1)?.payment?.method === 'cash' && shown.at(-1).payment.tendered === 5000);
   $('checkoutDoneBtn').click();
   await waitFor('the sale to reach the server', async () => (await one(`select count(*)::int n from public.sales`)).n === 1);
+  await waitFor('the thank-you on the customer screen', () => shown.at(-1)?.thanks?.tendered === 5000 && shown.at(-1).thanks.total === onScreen.total);
   check('a finished sale empties the bar and closes the order', $('cartBar').classList.contains('is-empty')
     && !$('viewBilling').classList.contains('order-open') && !$('grid').querySelector('[data-qty]'));
   check('cash sale: the tapped-twice item counted twice', (await one(`select max(quantity)::int most from public.sale_items`)).most === 2);
@@ -177,6 +198,9 @@ try {
   type($('newCustomerPhone'), '0917 555 0101');
   $('checkoutDoneBtn').click();
   await waitFor('the credit sale on the server', async () => (await one(`select count(*)::int n from public.sales where payment_method = 'credit' and customer_id is not null`)).n === 1);
+  check("the customer screen never gets a credit customer's name or phone", shown.some((m) => m?.payment?.method === 'credit')
+    && !JSON.stringify(shown).includes('Juan') && !JSON.stringify(shown).includes('0917'));
+  customerScreen.close();
 
   // The menu (on a phone it slides in from the top bar's button): picking a
   // screen closes it, and so does Escape.
@@ -304,6 +328,16 @@ try {
   await appSync.flushOutbox();
   await waitFor('the not-synced count', () => $('statusLabel').textContent.includes('1 not synced') && $('statusPill').classList.contains('attention'));
   check('a refused record is announced', toasts().includes("couldn't be saved on the server"), toasts());
+  // Once: a Sync now that doesn't get it through says nothing new.
+  const announced = () => toasts().split("couldn't be saved").length - 1;
+  const before = announced();
+  await appSync.retryFailedOutbox();
+  await appSync.flushOutbox(); // retried, so not counted for now
+  await waitFor('the count to clear meanwhile', () => !$('statusLabel').textContent.includes('not synced'));
+  await appDb.db.outbox_queue.where('entity_type').equals('spaceship').modify({ retry_count: 7, last_attempt_at: null });
+  await appSync.flushOutbox();
+  await waitFor('the count to come back', () => $('statusLabel').textContent.includes('1 not synced'));
+  check('a refused record is announced only once', announced() === before, toasts());
   await appDb.db.outbox_queue.where('entity_type').equals('spaceship').delete();
   await appSync.flushOutbox();
   await waitFor('the count to clear', () => !$('statusLabel').textContent.includes('not synced'));
