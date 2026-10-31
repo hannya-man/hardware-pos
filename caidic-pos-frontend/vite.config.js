@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 import { defineConfig, loadEnv } from 'vite';
 
 // The published app's Content-Security-Policy: it runs only its own files and
@@ -33,4 +34,13 @@ function contentSecurityPolicy(supabaseUrl) {
 export default defineConfig(({ mode }) => ({
   base: './',
   plugins: [contentSecurityPolicy(loadEnv(mode, process.cwd(), 'VITE_').VITE_SUPABASE_URL)],
+  // Two pages: the till, and the customer's screen it opens on a second monitor.
+  build: {
+    rollupOptions: {
+      input: {
+        main: fileURLToPath(new URL('./index.html', import.meta.url)),
+        customer: fileURLToPath(new URL('./customer.html', import.meta.url)),
+      },
+    },
+  },
 }));

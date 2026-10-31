@@ -2,7 +2,9 @@
 # tests pass, it runs the API file (supabase/migrations/20261015000001_pos_api.sql)
 # and every migration after 20261016000000_security_controls.sql, each written
 # to be safe to run again, in one transaction: all of it applies, or none of
-# it does. Runs when any of them changes on main, or by hand (Actions >
+# it does. The same transaction records every migration file in Supabase's
+# own migration history, so Supabase's GitHub integration doesn't replay
+# them. Runs when any of them changes on main, or by hand (Actions >
 # Update the database > Run workflow). The reason for a failure is written on
 # the run's page.
 #
@@ -62,12 +64,23 @@ jobs:
         run: |
           command -v psql > /dev/null || { sudo apt-get update -qq && sudo apt-get install -y -qq postgresql-client; }
           files=(-f supabase/migrations/20261015000001_pos_api.sql)
+          history=''
           for f in supabase/migrations/*.sql; do
             if [[ "$(basename "$f")" > "20261016000000_security_controls.sql" ]]; then files+=(-f "$f"); fi
+            name=$(basename "$f" .sql)
+            history+="${history:+, }('${name%%_*}', '${name#*_}')"
           done
+          # Supabase's GitHub integration replays every file missing from its own
+          # migration history, and the first one fails on tables that are already
+          # there. All of them are in the database (the first ones were run in the
+          # SQL Editor), so each is recorded there as applied.
+          record="create schema if not exists supabase_migrations;
+            create table if not exists supabase_migrations.schema_migrations (version text not null primary key);
+            alter table supabase_migrations.schema_migrations add column if not exists statements text[], add column if not exists name text;
+            insert into supabase_migrations.schema_migrations (version, name) values $history on conflict (version) do nothing;"
           echo "Applying ${files[*]}"
           if ! psql "$SUPABASE_DB_URL" --no-psqlrc -v ON_ERROR_STOP=1 --single-transaction \
-              -c 'set client_min_messages to warning' "${files[@]}" > psql.log 2>&1; then
+              -c 'set client_min_messages to warning' "${files[@]}" -c "$record" > psql.log 2>&1; then
             cat psql.log
             why=$(awk 'NF' psql.log | tail -n 3)
             why=${why//'%'/%25}

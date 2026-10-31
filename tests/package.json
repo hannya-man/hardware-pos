@@ -4,7 +4,7 @@
   "type": "module",
   "description": "Checks for the server functions (on real Postgres via PGlite), the app's sync code, and the service worker. Run with npm test.",
   "scripts": {
-    "test": "node sql.test.mjs && node app.test.mjs && node sw.test.mjs && node ui.test.mjs"
+    "test": "node sql.test.mjs && node app.test.mjs && node sw.test.mjs && node ui.test.mjs && node customer.test.mjs"
   },
   "devDependencies": {
     "@electric-sql/pglite": "0.5.10",

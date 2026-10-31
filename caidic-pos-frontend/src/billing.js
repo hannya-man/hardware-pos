@@ -175,7 +175,55 @@ function drawCart() {
   drawCartBar(count, total);
   markTiles();
   if (checkoutTotal !== null) drawCheckout();
+  tellCustomer();
 }
+
+// ---------------------------------------------------------------------------
+// The customer's screen (customer.html), on a second monitor facing the
+// counter: the order as it's rung up, the total, and at checkout how it's
+// paid and the change. Both windows run in the same browser on the same
+// computer, so a BroadcastChannel carries it. Only this order goes there:
+// nothing about the customer's credit, other customers, or the store.
+// ---------------------------------------------------------------------------
+
+const customerScreen = new BroadcastChannel('rrc-customer-screen');
+let customerView = null;
+
+function tellCustomer(view = orderView()) {
+  customerView = view;
+  customerScreen.postMessage(view);
+}
+
+function orderView() {
+  const cash = $('checkoutCash').value.trim();
+  return {
+    lines: cart.map((l) => ({ name: l.name_snapshot, unit: l.unit_snapshot, quantity: l.quantity, price: l.unit_price_snapshot, total: l.line_total })),
+    total: cartTotal(),
+    payment: checkoutTotal === null ? null : { method, tendered: method === 'cash' && cash ? Number(cash) : null },
+  };
+}
+
+// A customer screen that just opened (or reloaded) asks what to show.
+customerScreen.addEventListener('message', (e) => {
+  if (e.data === 'hello') customerScreen.postMessage(customerView ?? orderView());
+});
+// The order lives in this window only: when it closes, so does the order.
+window.addEventListener('pagehide', () => customerScreen.postMessage({ lines: [], total: 0, payment: null }));
+
+// Chrome and Edge can open it straight onto the other monitor (they ask once
+// for permission to see the screens); otherwise it's dragged there.
+$('customerScreenBtn').addEventListener('click', async () => {
+  const win = window.open('./customer.html', 'rrc-customer-screen', 'popup,width=1024,height=700');
+  if (!win) return toast('The browser blocked the customer screen. Allow pop-ups for this site, then try again.', 'error');
+  try {
+    const { screens, currentScreen } = await window.getScreenDetails();
+    const other = screens.find((s) => s.left !== currentScreen.left || s.top !== currentScreen.top);
+    if (other) {
+      win.moveTo(other.availLeft, other.availTop);
+      win.resizeTo(other.availWidth, other.availHeight);
+    }
+  } catch { /* one monitor, another browser, or permission refused: it stays where it opened */ }
+});
 
 // Phones: the order sits in a sheet that opens from a bar at the bottom of
 // the screen. The bar shows the count and total and can charge straight away.
@@ -311,6 +359,7 @@ function refreshAmounts() {
   $('checkoutChangeRow').classList.toggle('short', short);
   $('checkoutChangeRow').classList.toggle('is-empty', typed === '');
   $('creditOwe').textContent = peso(Math.max(0, round2(checkoutTotal - (Number($('creditDown').value) || 0))));
+  tellCustomer();
 }
 
 for (const [id, row] of [['checkoutCash', 'checkoutChangeRow'], ['creditDown', 'creditOwe']]) {
@@ -401,6 +450,7 @@ $('checkoutCloseBtn').addEventListener('click', async () => {
 function closeCheckout() {
   closeModal('checkoutOverlay');
   checkoutTotal = null;
+  tellCustomer();
 }
 
 // Works out what's being paid, or explains what's missing. Cash and GCash pay
@@ -447,6 +497,7 @@ async function finishSale(print) {
     const saleId = await completeSale({ cashier_id: session.user.id, shift_id: session.shiftId, cart: lines, payment });
     closeCheckout();
     clearCart();
+    tellCustomer({ thanks: { total, method, tendered: method === 'cash' ? payment.tendered : null } });
     flushOutbox().catch(() => {}); // the sale and its pick list go out now when online, not on the next sync
     if (print) printSaleSlip(saleId, lines, METHOD_LABELS[method], method === 'credit' ? customer.name : null);
 
