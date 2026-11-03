@@ -4,7 +4,7 @@
 
 import { db } from './local-db.js';
 import {
-  fetchStock, updateProduct, createProduct, fetchNextSku, fetchCategories,
+  fetchStock, updateProduct, createProduct, fetchNextSku, fetchCategories, createCategory,
   receiveStock, submitMaterialRequest, pullCatalog, flushOutbox,
   fetchMaterialRequests, fulfillMaterialRequest,
 } from './sync-worker.js';
@@ -12,7 +12,7 @@ import { session, withServerAuth, log, connectToServer } from './session.js';
 import { searchMatcher } from './input-handler.js';
 import {
   $, esc, peso, qty, round2, fmtTime, badge, icon, keepDecimal, setStatus, showSelected,
-  tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast, printOnly, countTo,
+  tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, showPrompt, toast, printOnly, countTo,
   printSlip, fmtDateTime,
 } from './ui.js';
 
@@ -34,14 +34,18 @@ let categories = [];
 
 const totalQty = (r) => r.store_good + r.warehouse_good;
 const value = (r, quantity) => round2(quantity * Number(r.unit_price));
+const categoryOptions = () => categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
 
 export async function renderStock() {
   categories = await db.categories.orderBy('name').toArray();
-  const chosen = $('stockCategory').value;
-  $('stockCategory').innerHTML = '<option value="">All categories</option>'
-    + categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('');
-  $('stockCategory').value = chosen;
+  fillCategoryFilter();
   await loadStock();
+}
+
+function fillCategoryFilter() {
+  const chosen = $('stockCategory').value;
+  $('stockCategory').innerHTML = `<option value="">All categories</option>${categoryOptions()}`;
+  $('stockCategory').value = chosen;
 }
 
 async function loadStock() {
@@ -183,6 +187,14 @@ $('editItemArchiveBtn').addEventListener('click', async () => {
 // ---------------------------------------------------------------------------
 
 let lastSuggestedSku = '';
+let lastCategory = '';
+
+// The categories, and last a way to add one for a new kind of item.
+const NEW_CATEGORY = 'new';
+const fillItemCategories = () => {
+  $('addItemCategory').innerHTML = `${categories.length ? '' : '<option value="">Choose a category</option>'}${categoryOptions()}`
+    + `<option value="${NEW_CATEGORY}">+ New category…</option>`;
+};
 
 $('addItemOpenBtn').addEventListener('click', async () => {
   for (const id of ['addItemSku', 'addItemName', 'addItemPrice']) $(id).value = '';
@@ -191,18 +203,41 @@ $('addItemOpenBtn').addEventListener('click', async () => {
   $('addItemReorder').value = '10';
   lastSuggestedSku = '';
   setStatus('addItemStatus');
-  $('addItemCategory').innerHTML = categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')
-    || '<option value="">Loading categories…</option>';
+  fillItemCategories();
   openModal('addItemOverlay');
 
   if (!categories.length) {
     categories = await withServerAuth(() => fetchCategories()).catch(() => []);
-    $('addItemCategory').innerHTML = categories.length
-      ? categories.map((c) => `<option value="${esc(c.id)}">${esc(c.name)}</option>`).join('')
-      : '<option value="">No categories found</option>';
+    fillItemCategories();
   }
+  lastCategory = $('addItemCategory').value;
   suggestSku();
 });
+
+// Saved on the server, then straight into this device's copy, so the Sell
+// screen and the Stock filter have it before the next sync.
+async function addCategory() {
+  let added = null;
+  await showPrompt('New category', {
+    message: 'For a new kind of item, like Paints. Items in it are grouped under it on the Sell screen.',
+    placeholder: 'Category name',
+    confirmLabel: 'Add',
+    onConfirm: async (name) => {
+      try {
+        added = await withServerAuth(() => createCategory(name));
+        return null;
+      } catch (err) {
+        return err.message;
+      }
+    },
+  });
+  if (!added) return null;
+  await db.categories.put(added);
+  categories = await db.categories.orderBy('name').toArray();
+  fillCategoryFilter();
+  toast(`${added.name} added.`);
+  return added.id;
+}
 
 async function suggestSku() {
   const categoryId = $('addItemCategory').value;
@@ -214,7 +249,16 @@ async function suggestSku() {
   } catch { /* only a suggestion */ }
 }
 
-$('addItemCategory').addEventListener('change', suggestSku);
+$('addItemCategory').addEventListener('change', async () => {
+  const select = $('addItemCategory');
+  if (select.value === NEW_CATEGORY) {
+    const id = await addCategory();
+    fillItemCategories();
+    select.value = id ?? lastCategory; // cancelled: back to what was chosen
+  }
+  lastCategory = select.value;
+  suggestSku();
+});
 
 $('addItemSubmitBtn').addEventListener('click', async () => {
   const payload = {

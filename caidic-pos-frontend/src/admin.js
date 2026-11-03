@@ -202,6 +202,7 @@ const EVENT_TEXT = {
   stock_received: (d) => `Added a delivery: ${qty(d.quantity)} × ${d.name ?? 'item'} to the ${d.location ?? 'store'}`,
   price_changed: (d) => `Changed the price of ${d.product_name} from ${peso(d.from)} to ${peso(d.to)}`,
   item_added_to_catalog: (d) => `Added a new item: ${d.product_name}`,
+  category_added: (d) => `Added a new category: ${d.category_name}`,
   item_details_updated: (d) => `Edited ${d.product_name}`,
   item_archived: (d) => `Archived ${d.product_name}`,
   item_restored: (d) => `Restored ${d.product_name}`,
@@ -653,7 +654,7 @@ const KIND = {
   void_requested: 'void', void_approved: 'void', void_rejected: 'void', void_cancelled: 'void', sale_voided: 'void',
   shift_started: 'shift', shift_ended: 'shift', login: 'shift', logout: 'shift', screen_locked: 'shift', session_resumed: 'shift',
   price_changed: 'stock', stock_received: 'stock', stock_quantity_adjusted: 'stock', return_accepted: 'stock',
-  item_added_to_catalog: 'stock', item_details_updated: 'stock', item_archived: 'stock', item_restored: 'stock',
+  item_added_to_catalog: 'stock', category_added: 'stock', item_details_updated: 'stock', item_archived: 'stock', item_restored: 'stock',
   staff_added: 'staff', staff_updated: 'staff', staff_deactivated: 'staff', staff_reactivated: 'staff', two_factor_enabled: 'staff', two_factor_disabled: 'staff',
 };
 const lastSeen = (iso) => {

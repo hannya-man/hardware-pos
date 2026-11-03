@@ -1566,6 +1566,32 @@ begin
           from public.categories c where c.is_active);
 end $$;
 
+-- args: { name }. A new category, added from the New item dialog. Names are
+-- compared ignoring case, so "paints" can't sit beside "Paints".
+create or replace function public.pos_category_create(auth jsonb, args jsonb default '{}'::jsonb) returns jsonb
+language plpgsql security definer set search_path = '' set timezone = 'UTC' as $$
+declare
+  v_user public.users;
+  v_name text;
+  v_existing text;
+  v_category public.categories;
+begin
+  v_user := pos.require_owner(auth);
+  v_name := regexp_replace(btrim(coalesce(args ->> 'name', '')), '\s+', ' ', 'g');
+  if v_name = '' or length(v_name) > 100 then
+    perform pos.fail(422, 'Enter the category''s name (up to 100 characters).');
+  end if;
+  select c.name into v_existing from public.categories c where lower(c.name) = lower(v_name);
+  if found then
+    perform pos.fail(422, format('There''s already a category called %s.', v_existing));
+  end if;
+
+  insert into public.categories (name) values (v_name) returning * into v_category;
+  perform pos.record_activity(auth, v_user.id, 'category_added', 'category', v_category.id,
+    jsonb_build_object('category_name', v_category.name));
+  return to_jsonb(v_category);
+end $$;
+
 -- args: { category_id }. Suggests the next item code from the codes already
 -- used in that category ("CEM-004" suggests "CEM-005"), or builds a short
 -- code from the category's name when it has no items yet. Only a

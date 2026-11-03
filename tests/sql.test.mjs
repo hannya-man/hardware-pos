@@ -335,7 +335,16 @@ check('categories', res.body.length === 12 && res.body[0].name === 'Adhesives & 
 const cemCat = catalog.products.find((p) => p.sku === 'CEM-001').category_id;
 res = await rpc(db, 'pos_next_sku', { auth: U(o1), args: { category_id: cemCat } });
 check('next sku follows the category', res.body?.sku === 'CEM-005', res.body);
-const paintCat = (await one(`insert into public.categories (name) values ('Paint & Coatings, Misc') returning id`)).id;
+refused('only owners add categories', await rpc(db, 'pos_category_create', { auth: U(cashierToken), args: { name: 'Paint' } }), 403);
+refused('a category needs a name', await rpc(db, 'pos_category_create', { auth: U(o1), args: { name: '   ' } }), 422, 'name');
+res = await rpc(db, 'pos_category_create', { auth: U(o1), args: { name: '  Paint &  Coatings, Misc ' } });
+ok('an owner adds a category', res);
+const paintCat = res.body.id;
+check('...with its spaces tidied', res.body.name === 'Paint & Coatings, Misc', res.body);
+refused('...once: the same name in other capitals is refused', await rpc(db, 'pos_category_create', { auth: U(o1), args: { name: 'PAINT & coatings, misc' } }), 422,
+  'already a category called Paint & Coatings, Misc');
+check('...on the activity log', (await one(`select details->>'category_name' n from public.activity_log where event_type = 'category_added'`))?.n === 'Paint & Coatings, Misc');
+check('...and sent to the tills', (await rpc(db, 'pos_catalog', { auth: T(), args: { since: catalog.server_time } })).body.categories.some((c) => c.id === paintCat));
 res = await rpc(db, 'pos_next_sku', { auth: U(o1), args: { category_id: paintCat } });
 check('next sku for an empty category', res.body?.sku === 'PCM-001', res.body);
 refused('next sku bad category', await rpc(db, 'pos_next_sku', { auth: U(o1), args: { category_id: randomUUID() } }), 422);
