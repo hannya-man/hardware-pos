@@ -48,7 +48,7 @@ const NAV = [
   ] },
   { section: 'Store', items: [
     { key: 'stock', label: 'Stock', icon: 'box', roles: OWNER, render: renderStock,
-      help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count. Counts never go below 0: an item sold with no stock left shows how many are on order, and stock that comes in (a delivery, a higher count, a return) goes to those orders first.' },
+      help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count. For a new kind of item, New item can add a category too. Counts never go below 0: an item sold with no stock left shows how many are on order, and stock that comes in (a delivery, a higher count, a return) goes to those orders first.' },
     { key: 'sales', label: 'Sales', icon: 'bag', roles: OWNER, render: renderSales,
       help: 'Every sale, with its items and how it was paid. Tap a sale to see it. To void one, a second owner has to approve within 10 minutes, or the sale stays as it is.' },
     { key: 'reports', label: 'Sales report', icon: 'chart', roles: OWNER, render: renderReports,

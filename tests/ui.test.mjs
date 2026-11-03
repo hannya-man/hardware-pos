@@ -309,6 +309,24 @@ try {
   check('stock: a Bisaya search finds the items by their English names', rows('stockTable').length === 6
     && rows('stockTable').every((r) => r.textContent.includes('Rebar')), rows('stockTable').map((r) => r.textContent.replace(/\s+/g, ' ')));
   type($('stockSearch'), '');
+  // A new kind of item: the owner adds its category from the New item dialog.
+  $('addItemOpenBtn').click();
+  await waitFor('New item, with a code suggested', () => !$('addItemOverlay').hidden && $('addItemSku').value);
+  check('New item offers a new category last', $('addItemCategory').options[$('addItemCategory').options.length - 1].textContent === '+ New category…');
+  type($('addItemCategory'), 'new');
+  await answer('Paints');
+  await waitFor('the new category, chosen, with a code from its name', () => $('addItemCategory').selectedOptions[0]?.textContent === 'Paints' && $('addItemSku').value === 'P-001');
+  check('...saved on the server, on this device, and in the Stock filter', (await one(`select count(*)::int n from public.categories where name = 'Paints'`)).n === 1
+    && (await appDb.db.categories.where('name').equals('Paints').count()) === 1 && [...$('stockCategory').options].some((o) => o.textContent === 'Paints'));
+  type($('addItemCategory'), 'new');
+  const again = await waitFor('the new category prompt', () => doc.querySelector('.overlay-top'));
+  again.querySelector('input').value = 'paints';
+  again.querySelector('[data-ok]').click();
+  const refusal = await waitFor('the same name refused', () => again.querySelector('.dialog-error:not([hidden])')?.textContent);
+  check('...and only once, in any capitals', refusal === "There's already a category called Paints.", refusal);
+  again.querySelector('[data-close]').click();
+  await waitFor('cancelled: back to the category that was chosen', () => !again.isConnected && $('addItemCategory').selectedOptions[0]?.textContent === 'Paints');
+  $('addItemOverlay').querySelector('[data-close]').click();
   await openScreen('staff');
   await waitFor('staff rows', () => rows('usersTable').length === 3);
   check('new passwords are typed hidden', $('usrPin').type === 'password' && $('editStaffPin').type === 'password');

@@ -412,6 +412,7 @@ const filters = (params = {}) => Object.fromEntries(Object.entries(params).filte
 export const fetchDashboard = (period) => rpc('pos_dashboard', { period });
 export const fetchStock = (includeArchived = false) => rpc('pos_stock', { include_archived: includeArchived });
 export const fetchCategories = () => rpc('pos_categories');
+export const createCategory = (name) => rpc('pos_category_create', { name });
 export const fetchNextSku = (categoryId) => rpc('pos_next_sku', { category_id: categoryId });
 export const createProduct = (payload) => rpc('pos_product_create', payload);
 export const updateProduct = (id, payload) => rpc('pos_product_update', { ...payload, id });
