@@ -48,17 +48,40 @@ export function attachScannerListener(onScan) {
 // Catalog lookups
 // ---------------------------------------------------------------------------
 
+// Bisaya (Cebuano) words for what the item names say in English, so a search
+// works in either language: "kabilya 10mm" finds Rebar 10mm. lansang also
+// finds the CWN, and sin or yero the roofing sheets named by brand.
+const ROOFING = ['roofing', 'sheet', 'lume', 'tamaraw'];
+const BISAYA = {
+  semento: ['cement'], kabilya: ['rebar'], tubo: ['pipe', 'tube'], siko: ['elbow'],
+  lansang: ['nail', 'cwn'], payong: ['umbrella'], alambre: ['wire'], sin: ROOFING, yero: ROOFING,
+  lababo: ['wash basin'], inidoro: ['toilet'], pultahan: ['door'], trapal: ['tarpaulin'],
+  baga: ['thick'], nipis: ['thin'], dako: ['large'], gamay: ['small'],
+  pula: ['red'], asul: ['blue'], berde: ['green'], puti: ['white'], itom: ['black'], dalag: ['yellow'],
+};
+// Bisaya spells e/i and o/u either way (kabelya, kabilya), so they count as one.
+const fold = (word) => word.replace(/e/g, 'i').replace(/o/g, 'u');
+const BISAYA_FOLDED = Object.entries(BISAYA).map(([word, means]) => [fold(word), means]);
+
+// Whether a text fits the search: every word of it has to be there, in any
+// order. A Bisaya word, or the start of one while it's still being typed, also
+// counts as its English meaning.
+export function searchMatcher(query) {
+  const words = query.toLowerCase().split(/\s+/).filter(Boolean).map((word) => [word,
+    ...BISAYA_FOLDED.filter(([bisaya]) => bisaya.startsWith(fold(word))).flatMap(([, means]) => means)]);
+  return (text) => {
+    const haystack = text.toLowerCase();
+    return words.every((alternatives) => alternatives.some((alt) => haystack.includes(alt)));
+  };
+}
+
 export async function searchProducts(query, limit = 20) {
   const raw = query.trim();
-  const q = raw.toLowerCase();
-  if (!q) return [];
+  if (!raw) return [];
+  const isMatch = searchMatcher(raw);
 
   const matches = await db.products
-    .filter((p) => isSellable(p) && (
-      (p.name ?? '').toLowerCase().includes(q)
-      || (p.sku ?? '').toLowerCase().includes(q)
-      || p.barcode === raw
-    ))
+    .filter((p) => isSellable(p) && (isMatch(`${p.name ?? ''} ${p.sku ?? ''}`) || p.barcode === raw))
     .toArray();
 
   return matches.sort((a, b) => (a.name ?? '').localeCompare(b.name ?? '')).slice(0, limit);

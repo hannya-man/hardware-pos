@@ -289,6 +289,10 @@ try {
   for (const screen of ['stock', 'sales', 'shifts', 'returns', 'staff', 'audit']) await openScreen(screen);
   await openScreen('stock');
   await waitFor('stock rows', () => rows('stockTable').length > 100);
+  type($('stockSearch'), 'kabelya');
+  check('stock: a Bisaya search finds the items by their English names', rows('stockTable').length === 6
+    && rows('stockTable').every((r) => r.textContent.includes('Rebar')), rows('stockTable').map((r) => r.textContent.replace(/\s+/g, ' ')));
+  type($('stockSearch'), '');
   await openScreen('staff');
   await waitFor('staff rows', () => rows('usersTable').length === 3);
   check('new passwords are typed hidden', $('usrPin').type === 'password' && $('editStaffPin').type === 'password');

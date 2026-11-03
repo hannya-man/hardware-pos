@@ -9,6 +9,7 @@ import {
   fetchMaterialRequests, fulfillMaterialRequest,
 } from './sync-worker.js';
 import { session, withServerAuth, log, connectToServer } from './session.js';
+import { searchMatcher } from './input-handler.js';
 import {
   $, esc, peso, qty, round2, fmtTime, badge, icon, keepDecimal, setStatus, showSelected,
   tableMessage, renderRows, onAction, openModal, closeModal, productPicker, showConfirm, toast, printOnly, countTo,
@@ -66,10 +67,10 @@ function stockBadge(r) {
 }
 
 function drawStock() {
-  const q = $('stockSearch').value.trim().toLowerCase();
+  const isMatch = searchMatcher($('stockSearch').value);
   const category = $('stockCategory').value;
   const lowOnly = $('stockLowOnly').checked;
-  const rows = stockRows.filter((r) => (!q || r.name.toLowerCase().includes(q) || r.sku.toLowerCase().includes(q))
+  const rows = stockRows.filter((r) => isMatch(`${r.name} ${r.sku}`)
     && (!category || r.category_id === category)
     && (!lowOnly || (r.is_active && r.low_stock)));
 
