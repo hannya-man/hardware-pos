@@ -257,7 +257,7 @@ export function toast(message, tone = '') {
   setTimeout(() => {
     el.classList.add('leaving');
     setTimeout(() => el.remove(), 250);
-  }, tone === 'error' ? 6000 : 3500);
+  }, tone ? 6000 : 3500); // warnings and errors stay long enough to read
 }
 
 // ---------------------------------------------------------------------------

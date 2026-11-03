@@ -1,6 +1,7 @@
 // Exercises every pos_* function the way the app calls them (as the anon
 // role, through the imitation PostgREST), against the real SQL files.
 import { createHmac, randomBytes, randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import bcrypt from 'bcryptjs';
 import { checker, createProject, rpc } from './harness.mjs';
 
@@ -220,21 +221,27 @@ check('push: unknown type fails alone', !res.body.results.weird.ok && /unknown e
 check('push: good item still saved', res.body.results[good.id].ok);
 check('push: failed sale left nothing behind', near(await cementLeft(), 97));
 
-// Oversold batch, and a delivery dated in the future
+// More sold than a batch has (another till sold from it first), then a
+// delivery dated in the future
+const onOrder = async (productId, saleId = null) => Number((await one(`select coalesce(-sum(delta), 0) q from public.stock_movements
+  where product_id = $1 and reason = 'on_order' and ($2::uuid is null or reference_id = $2)`, [productId, saleId])).q);
 const tiny = batchFor('CEM-002');
 await db.query(`update public.stock_batches set qty_good_remaining = 1 where id = $1`, [tiny.batch.id]);
 const oversell = saleItem({ sale: randomUUID(), lines: [{ ...tiny, qty: 3 }] });
 const futureId = randomUUID();
-res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [oversell, { id: randomUUID(), entity_type: 'stock_batch', payload: { id: futureId, product_id: tiny.product.id, location: 'store', received_at: new Date(Date.now() + 86400e3).toISOString(), qty_received: 5, qty_good_remaining: 5, qty_damaged: 0, source: 'receiving', created_by: cashier, client_created_at: nowIso(), terminal_id: 'term-1' } }] } });
-check('oversell applied', near((await one(`select qty_good_remaining from public.stock_batches where id = $1`, [tiny.batch.id])).qty_good_remaining, -2));
-check('oversell flagged', (await one(`select count(*)::int n from public.audit_logs where action_type = 'batch_oversold'`)).n === 1);
+res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [oversell] } });
+check('oversold: the batch stops at 0, and what it no longer had goes on order', res.body.results[oversell.id]?.ok
+  && near((await one(`select qty_good_remaining from public.stock_batches where id = $1`, [tiny.batch.id])).qty_good_remaining, 0)
+  && near(await onOrder(tiny.product.id), 2), res.body);
+res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'stock_batch', payload: { id: futureId, product_id: tiny.product.id, location: 'store', received_at: new Date(Date.now() + 86400e3).toISOString(), qty_received: 5, qty_good_remaining: 5, qty_damaged: 0, source: 'receiving', created_by: cashier, client_created_at: nowIso(), terminal_id: 'term-1' } }] } });
+check('...and the next delivery fills that order first', near((await one(`select qty_good_remaining from public.stock_batches where id = $1`, [futureId])).qty_good_remaining, 3)
+  && near(await onOrder(tiny.product.id), 0));
 check('future delivery clamped', (await one(`select received_at <= now() + interval '1 minute' as c from public.stock_batches where id = $1`, [futureId])).c);
 check('clamp logged', (await one(`select count(*)::int n from public.audit_logs where action_type = 'timestamp_anomaly_clamped'`)).n === 1);
 res = await rpc(db, 'pos_login', { auth: T(), args: { user_id: owner1, pin: '111111' } });
 res = await rpc(db, 'pos_stock', { auth: U(res.body.token), args: {} });
 const oversoldRow = res.body.find((r) => r.id === tiny.product.id);
-const onHand = (await one(`select sum(qty_good_remaining)::numeric q from public.stock_batches where product_id = $1 and location = 'store'`, [tiny.product.id])).q;
-check('Stock screen counts an oversold batch, so it shows what is really on hand', near(oversoldRow.store_good, onHand) && near(onHand, 3), { shown: oversoldRow.store_good, onHand });
+check('Stock screen: what the delivery left after the order, with nothing on order', near(oversoldRow.store_good, 3) && oversoldRow.on_order === 0, oversoldRow);
 
 // A tampered terminal can't record what only two owners or the server decide.
 const tamper = async (label, item, text) => {
@@ -261,10 +268,7 @@ await tamper('a 1-bag sale that takes 11 bags off the count', forged((p) => { p.
 await tamper('a sale that takes less stock than it sold', forged((p) => { p.movements[0].delta = -0.5; }), 'stock taken');
 await tamper('a sale that takes nothing off the count', forged((p) => { p.movements = []; }), 'stock taken');
 await tamper("a sale that takes another item's stock", forged((p) => { p.movements[0].batch_id = rebar.batch.id; }), 'another item');
-await tamper("a sale that takes the warehouse's stock", (() => {
-  const s = saleItem({ sale: randomUUID(), lines: [{ product: rebar.product, batch: { id: deliveryId }, qty: 1 }], tendered: 500 });
-  return s;
-})(), 'warehouse');
+await tamper('an on-order line that names a batch', forged((p) => { p.movements[0].reason = 'on_order'; }), 'belong');
 check('refused sales took no stock', near(await cementLeft(), cementBeforeTamper));
 // A sale sent again under its id can't gain lines or take more stock.
 {
@@ -814,6 +818,67 @@ if (intoWeek > 300 && intoWeek < 7 * 86400 - 300) {
 }
 res = await rpc(db, 'pos_sales_report', { auth: U(o1), args: { period: 'year', offset: -3 } });
 check('sales report: a negative offset means this period', res.status === 200 && res.body.offset === 0, res.body.offset);
+
+// ---------------------------------------------------------------------------
+// Orders wait for stock: a count stops at 0, what's missing goes on order,
+// and whatever stock comes in fills the oldest order first.
+{
+  const flat = batchFor('BAR-016'); // 100 in the store, untouched until now
+  const left = async () => Number((await one(`select sum(qty_good_remaining) q from public.stock_batches where product_id = $1`, [flat.product.id])).q);
+  const sell = (qty, takes, when = nowIso()) => { // takes: [batch id or null, quantity] as the till chose them
+    const s = saleItem({ sale: randomUUID(), shift: null, lines: [{ ...flat, qty }], tendered: 1e6, when });
+    s.payload.movements = takes.map(([batch, n]) => ({ ...s.payload.movements[0], id: randomUUID(), batch_id: batch, delta: -n, reason: batch ? 'sale' : 'on_order' }));
+    return s;
+  };
+  const first = sell(103, [[flat.batch.id, 100], [null, 3]], new Date(Date.now() - 60e3).toISOString());
+  const second = sell(4, [[null, 4]]);
+  const list = { id: randomUUID(), entity_type: 'material_request', payload: { id: randomUUID(), terminal_id: 'term-1', sale_id: first.entity_id, requested_by: cashier, notes: null, items: [{ product_id: flat.product.id, sku_snapshot: flat.product.sku, name_snapshot: flat.product.name, unit_snapshot: 'pc', quantity_requested: 103 }], status: 'pending', client_created_at: nowIso() } };
+  res = await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [first, second, list] } });
+  check('orders: more than is in stock can be sold; the count stops at 0', Object.values(res.body.results).every((r) => r.ok)
+    && near(await left(), 0) && near(await onOrder(flat.product.id), 7), res.body);
+  res = await rpc(db, 'pos_material_requests', { auth: U(o1), args: { status: 'pending' } });
+  const listed = res.body.data.find((r) => r.id === list.payload.id);
+  check("orders: the sale's pick list says how many are waiting for stock", listed?.items[0].on_order === 3 && listed.items[0].quantity_requested === 103, listed?.items);
+  res = await rpc(db, 'pos_stock', { auth: U(o1), args: {} });
+  const row = res.body.find((r) => r.id === flat.product.id);
+  check('orders: the Stock screen shows 0, with 7 on order', row.store_good === 0 && row.on_order === 7, row);
+
+  res = await rpc(db, 'pos_product_update', { auth: U(o1), args: { id: flat.product.id, store_qty: 5 } });
+  check('orders: 5 counted in by hand go to the oldest order first (3), then the next (2)', res.body.filled_orders === 5 && near(await left(), 0)
+    && near(await onOrder(flat.product.id, first.entity_id), 0) && near(await onOrder(flat.product.id, second.entity_id), 2),
+    { filled: res.body.filled_orders, left: await left(), first: await onOrder(flat.product.id, first.entity_id), second: await onOrder(flat.product.id, second.entity_id) });
+  const delivery = randomUUID();
+  await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [{ id: randomUUID(), entity_type: 'stock_batch', payload: { id: delivery, product_id: flat.product.id, location: 'warehouse', received_at: nowIso(), qty_received: 10, qty_good_remaining: 10, qty_damaged: 0, source: 'receiving', created_by: cashier, client_created_at: nowIso(), terminal_id: 'term-1' } }] } });
+  check('orders: a delivery to the warehouse fills the rest', near(await left(), 8) && near(await onOrder(flat.product.id), 0));
+
+  // A till that didn't know of the delivery puts it all on order: the server fills it at once.
+  const unaware = sell(2, [[null, 2]]);
+  await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [unaware] } });
+  check("orders: stock the till didn't know about fills its order at once", near(await left(), 6) && near(await onOrder(flat.product.id), 0));
+  // Voiding a sale with some still on order: its stock comes back, its order
+  // closes, and the stock goes to the order waiting after it.
+  const cancelled = sell(9, [[delivery, 6], [null, 3]]);
+  const after = sell(2, [[null, 2]]);
+  await rpc(db, 'pos_sync_push', { auth: T(), args: { items: [cancelled, after] } });
+  res = await rpc(db, 'pos_void_request_create', { auth: U(o1), args: { sale_id: cancelled.entity_id, reason: 'Customer cancelled' } });
+  await one(`select pos.void_sale('{}'::jsonb, v, u) from public.void_requests v, public.users u where v.id = $1 and u.id = $2`, [res.body.id, owner2]);
+  check('orders: a void closes its order and its stock fills the next one', near(await left(), 4) && near(await onOrder(flat.product.id), 0)
+    && near(await onOrder(flat.product.id, cancelled.entity_id), 0), { left: await left(), onOrder: await onOrder(flat.product.id) });
+  check('orders: no batch ever went below 0', (await one(`select count(*)::int n from public.stock_batches where qty_good_remaining < 0`)).n === 0);
+
+  // Batches sold below 0 before orders could wait are settled by the
+  // migration, run again here as the database workflow does on every deploy.
+  const inStore = async (id) => Number((await one(`select sum(qty_good_remaining) q from public.stock_batches where product_id = $1 and location = 'store'`, [id])).q);
+  const counted = await one(`select id from public.stock_batches where product_id = $1 and location = 'store' and id <> $2`, [flat.product.id, flat.batch.id]);
+  await db.query(`update public.stock_batches set qty_good_remaining = -2 where id = $1`, [flat.batch.id]);
+  await db.query(`update public.stock_batches set qty_good_remaining = 5 where id = $1`, [counted.id]);
+  const lone = batchFor('BAR-017');
+  await db.query(`update public.stock_batches set qty_good_remaining = -4 where id = $1`, [lone.batch.id]);
+  for (let run = 0; run < 2; run++) await db.exec(readFileSync(new URL('../supabase/migrations/20261103000000_orders_wait_for_stock.sql', import.meta.url), 'utf8'));
+  check('migration: a batch sold below 0 is settled from the same place, keeping its count', near(await inStore(flat.product.id), 3)
+    && (await one(`select count(*)::int n from public.stock_batches where qty_good_remaining < 0`)).n === 0, await inStore(flat.product.id));
+  check('migration: a place whose count was below 0 stops at 0', near(await inStore(lone.product.id), 0));
+}
 
 // Sign-out
 ok('logout', await rpc(db, 'pos_logout', { auth: U(o1), args: {} }));

@@ -419,6 +419,9 @@ input.input::-webkit-search-cancel-button {
 .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
 .badge-ok { background: var(--ok-soft); color: var(--ok); }
 .badge-warn { background: var(--warn-soft); color: var(--warn); }
+/* Sold with no stock left: on order until the next stock arrives */
+.on-order { color: var(--warn); font-weight: 600; }
+.on-order .icon { width: 14px; height: 14px; margin-right: 3px; vertical-align: -2px; }
 .badge-bad { background: var(--bad-soft); color: var(--bad); }
 .badge-info { background: var(--info-soft); color: var(--info); }
 
@@ -711,6 +714,7 @@ input.input::-webkit-search-cancel-button {
 .line-info { grid-area: info; min-width: 0; }
 .line-name { display: block; font-weight: 500; line-height: 1.35; }
 .line-price { font-size: 12.5px; color: var(--text-3); }
+.line-warn { display: block; margin-top: 3px; font-size: 12.5px; }
 .line-total { grid-area: total; align-self: start; font-weight: 600; font-variant-numeric: tabular-nums; }
 .line .stepper { grid-area: qty; justify-self: start; }
 .line .icon-btn { grid-area: remove; justify-self: end; }
@@ -794,6 +798,7 @@ input.input::-webkit-search-cancel-button {
   animation: toast-in 0.2s ease-out; transition: opacity 0.2s, transform 0.2s;
 }
 .toast-error { background: var(--danger); color: #fff; }
+.toast-warn { border-left: 4px solid var(--warn); }
 .toast.leaving { opacity: 0; transform: translateY(6px); }
 @keyframes toast-in { from { opacity: 0; transform: translateY(8px); } }
 

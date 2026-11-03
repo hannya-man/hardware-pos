@@ -89,10 +89,10 @@ const cementLine = await makeCartLine((await findExactProduct('CEM-001')).id);
 cementLine.quantity = 3;
 cementLine.line_total = 3 * cementLine.unit_price_snapshot;
 const nailLine = await makeCartLine((await findExactProduct('BAR-002')).id);
-const cashSaleId = await sync.completeSale({ cashier_id: cashierId, shift_id: shiftId, cart: [cementLine, nailLine], payment: { method: 'cash', tendered: 1000 } });
+const cashSaleId = (await sync.completeSale({ cashier_id: cashierId, shift_id: shiftId, cart: [cementLine, nailLine], payment: { method: 'cash', tendered: 1000 } })).id;
 const customer = await sync.saveCustomer({ name: ' Maria Lopez ', phone: '0917 555 0101' });
 const creditLine = await makeCartLine((await findExactProduct('CEM-002')).id);
-const creditSaleId = await sync.completeSale({ cashier_id: cashierId, shift_id: shiftId, cart: [creditLine], payment: { method: 'credit', tendered: 100, paid: 100, customer_id: customer.id } });
+const creditSaleId = (await sync.completeSale({ cashier_id: cashierId, shift_id: shiftId, cart: [creditLine], payment: { method: 'credit', tendered: 100, paid: 100, customer_id: customer.id } })).id;
 await sync.recordCreditPayment({ customer_id: customer.id, amount: 50, payment_method: 'cash', received_by: cashierId, shift_id: shiftId });
 const rebar = await findExactProduct('BAR-001');
 await sync.receiveStock({ product_id: rebar.id, location: 'warehouse', quantity: 20, damaged_quantity: 1, actor_id: cashierId });
@@ -211,6 +211,29 @@ check('a wrong password at the till reaches the Audit log', wrongPasswords.data.
 const everything = await sync.fetchAuditLog({});
 check('the Audit log has the void and the cash difference', ['admin_void', 'shift_close_discrepancy']
   .every((kind) => everything.data.some((a) => a.action_type === kind)), everything.data.map((a) => a.action_type));
+
+// --- more sold than is in stock: the rest waits for the next delivery -------
+{
+  const bar = await findExactProduct('BAR-016'); // 100 in the store
+  const line = await makeCartLine(bar.id);
+  check('an order line knows what is in stock', line.in_stock === 100, line.in_stock);
+  line.quantity = 103;
+  line.line_total = 103 * line.unit_price_snapshot;
+  const sale = await sync.completeSale({ cashier_id: cashierId, shift_id: null, cart: [line], payment: { method: 'cash', tendered: 1e6 } });
+  check('selling past the stock: 100 taken, 3 on order, none left', sale.stock[0].on_order === 3 && sale.stock[0].left === 0, sale.stock);
+  await sync.receiveStock({ product_id: bar.id, location: 'warehouse', quantity: 10, actor_id: cashierId });
+  await sync.flushOutbox();
+  const server = await one(`select (select sum(qty_good_remaining) from public.stock_batches where product_id = $1) as stock,
+    (select coalesce(-sum(delta), 0) from public.stock_movements where product_id = $1 and reason = 'on_order') as on_order`, [bar.id]);
+  check('server: the count stopped at 0, and the delivery filled the order', near(server.stock, 7) && near(server.on_order, 0), server);
+  await sync.pullCatalog();
+  const next = await makeCartLine(bar.id);
+  check('after the next sync, the till sees what the delivery left', next.in_stock === 7, next.in_stock);
+  const fromWarehouse = await sync.completeSale({ cashier_id: cashierId, shift_id: null, cart: [next], payment: { method: 'cash', tendered: 1e6 } });
+  await sync.flushOutbox();
+  check("with the store at 0, a sale takes the warehouse's stock", fromWarehouse.stock[0].on_order === 0 && (await db.outbox_queue.count()) === 0
+    && near((await one(`select sum(qty_good_remaining) q from public.stock_batches where product_id = $1 and location = 'warehouse'`, [bar.id])).q, 6));
+}
 
 // --- sign-out, Sync now, and a bad key ---------------------------------------
 await sync.forgetServerLogin();

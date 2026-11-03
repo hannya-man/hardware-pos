@@ -471,6 +471,54 @@ begin
   return v_delta;
 end $$;
 
+-- A sale can take more than is in stock: what there isn't goes on order (an
+-- on_order movement with no batch), and the count stops at 0. Orders take
+-- whatever stock comes in, oldest order first, from the store and then the
+-- warehouse, oldest batch first. Each fill adds two ledger lines (the stock
+-- taken and the order closed by as much), so the history stays. Returns how
+-- much it filled.
+create or replace function pos.fill_orders(p_product uuid) returns numeric
+language plpgsql set search_path = '' as $$
+declare
+  v_order record;
+  v_batch record;
+  v_need numeric;
+  v_take numeric;
+  v_filled numeric := 0;
+begin
+  -- One at a time per item, so the same stock is never handed out twice.
+  perform 1 from public.products p where p.id = p_product for update;
+
+  for v_order in
+    select m.reference_id as sale_id, -sum(m.delta) as owed
+    from public.stock_movements m
+    where m.product_id = p_product and m.reason = 'on_order'
+    group by m.reference_id
+    having sum(m.delta) < 0
+    order by min(m.client_created_at), m.reference_id
+  loop
+    v_need := v_order.owed;
+    for v_batch in
+      select b.id, b.qty_good_remaining from public.stock_batches b
+      where b.product_id = p_product and b.qty_good_remaining > 0
+      order by b.location = 'warehouse', b.received_at
+      for update
+    loop
+      v_take := least(v_need, v_batch.qty_good_remaining);
+      update public.stock_batches set qty_good_remaining = qty_good_remaining - v_take where id = v_batch.id;
+      insert into public.stock_movements (product_id, batch_id, delta, reason, reference_id, note, client_created_at)
+      values (p_product, v_batch.id, -v_take, 'sale', v_order.sale_id, 'Order filled when stock came in', now()),
+             (p_product, null, v_take, 'on_order', v_order.sale_id, 'Order filled when stock came in', now());
+      v_need := v_need - v_take;
+      v_filled := v_filled + v_take;
+      exit when v_need <= 0;
+    end loop;
+    exit when v_need > 0; -- out of stock: the later orders keep waiting
+  end loop;
+
+  return v_filled;
+end $$;
+
 -- ===========================================================================
 -- JSON the screens expect (the shapes Laravel sent)
 -- ===========================================================================
@@ -517,6 +565,13 @@ $$;
 create or replace function pos.material_request_json(p_request public.material_requests) returns jsonb
 language sql stable set search_path = '' as $$
   select to_jsonb(p_request) || jsonb_build_object(
+    -- Each item with how much of it is still on order, waiting for stock.
+    'items', (select coalesce(jsonb_agg(i.item || jsonb_build_object('on_order', coalesce(
+                 (select -sum(m.delta) from public.stock_movements m
+                  where m.reference_id = p_request.sale_id and m.reason = 'on_order'
+                    and m.product_id = pos.uuid_or_null(i.item ->> 'product_id')), 0)) order by i.n), '[]'::jsonb)
+              from jsonb_array_elements(case when jsonb_typeof(p_request.items) = 'array' then p_request.items else '[]'::jsonb end)
+                with ordinality as i(item, n)),
     'requested_by', pos.user_brief(p_request.requested_by),
     'fulfilled_by', pos.user_brief(p_request.fulfilled_by),
     'sale', (select jsonb_build_object(
@@ -615,9 +670,10 @@ begin
 end $$;
 
 -- Puts the stock back (an offsetting void_restock movement per original sale
--- movement, into the same batches), cancels the sale's pick list, and records
--- who asked and who agreed. A voided credit sale stops counting toward the
--- customer's balance on its own.
+-- movement, into the same batches), closes what was still on order, cancels
+-- the sale's pick list, and records who asked and who agreed. The stock that
+-- came back goes to other orders waiting for it. A voided credit sale stops
+-- counting toward the customer's balance on its own.
 create or replace function pos.void_sale(p_auth jsonb, p_request public.void_requests, p_owner public.users) returns void
 language plpgsql set search_path = '' as $$
 declare
@@ -628,6 +684,9 @@ begin
   if not found or v_sale.status <> 'completed' then
     perform pos.fail(422, 'This sale is no longer a completed sale.');
   end if;
+  -- Before any stock moves, like pos.fill_orders: an order can't be filled meanwhile.
+  perform 1 from public.products p where p.id in (select i.product_id from public.sale_items i where i.sale_id = v_sale.id)
+  order by p.id for update;
 
   update public.sales set status = 'voided', voided_by = p_request.requested_by, void_reason = p_request.reason
   where id = v_sale.id;
@@ -644,6 +703,13 @@ begin
       update public.stock_batches set qty_good_remaining = qty_good_remaining + abs(v_move.delta) where id = v_move.batch_id;
     end if;
   end loop;
+
+  insert into public.stock_movements (product_id, delta, reason, reference_id, actor_id, client_created_at)
+  select m.product_id, -sum(m.delta), 'on_order', v_sale.id, p_owner.id, now()
+  from public.stock_movements m where m.reference_id = v_sale.id and m.reason = 'on_order'
+  group by m.product_id having sum(m.delta) < 0;
+
+  perform pos.fill_orders(i.product_id) from (select distinct product_id from public.sale_items where sale_id = v_sale.id) i;
 
   insert into public.audit_logs (terminal_id, actor_id, approver_id, action_type, entity_type, entity_id, details, client_created_at)
   values (
@@ -750,18 +816,20 @@ begin
   if exists (
     select 1 from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) as m
     where m ->> 'reference_id' is distinct from v_id
-       or coalesce(m ->> 'reason', 'sale') <> 'sale'
+       or coalesce(m ->> 'reason', 'sale') not in ('sale', 'on_order')
+       or (m ->> 'reason' = 'on_order' and m ->> 'batch_id' is not null)
        or coalesce((m ->> 'delta')::numeric, 0) >= 0
        or not exists (select 1 from jsonb_array_elements(p_payload -> 'items') as i where i ->> 'product_id' = m ->> 'product_id'))
   then
     raise exception 'A stock movement doesn''t belong to this sale.';
   end if;
 
-  -- The stock taken has to be exactly what was sold, item by item, and only
-  -- from that item's own batches in the store. Otherwise a one-bag sale could
-  -- take eleven bags off the count, or another item's, and hide ten that
-  -- went missing. (The app always takes the quantity sold, oldest batch first;
-  -- a shortfall goes on the last batch, or on no batch at all.)
+  -- The stock taken plus what went on order has to be exactly what was sold,
+  -- item by item, and taken only from that item's own batches. Otherwise a
+  -- one-bag sale could take eleven bags off the count, or another item's, and
+  -- hide ten that went missing. (The app takes the quantity sold from the
+  -- store's batches and then the warehouse's, oldest first; what there isn't
+  -- goes on order.)
   if exists (
     select 1
     from (select i ->> 'product_id' as product_id, sum((i ->> 'quantity')::numeric) as sold
@@ -776,9 +844,9 @@ begin
   if exists (
     select 1 from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) as m
     join public.stock_batches b on b.id = pos.uuid_or_null(m ->> 'batch_id')
-    where b.product_id is distinct from pos.uuid_or_null(m ->> 'product_id') or b.location <> 'store'
+    where b.product_id is distinct from pos.uuid_or_null(m ->> 'product_id')
   ) then
-    raise exception 'A stock movement draws on another item''s stock, or the warehouse''s.';
+    raise exception 'A stock movement draws on another item''s stock.';
   end if;
 end $$;
 
@@ -794,8 +862,9 @@ declare
   v_clamped boolean := false;
   v_item jsonb;
   v_move jsonb;
-  v_batch_id uuid;
-  v_left numeric;
+  v_moved_at timestamptz;
+  v_want numeric;
+  v_take numeric;
   v_low record;
 begin
   perform pos.check_sale(p_payload);
@@ -861,41 +930,45 @@ begin
     on conflict (id) do nothing;
   end loop;
 
+  -- Before any stock moves, in one order, like pos.fill_orders.
+  perform 1 from public.products p
+  where p.id in (select pos.uuid_or_null(i ->> 'product_id') from jsonb_array_elements(p_payload -> 'items') as i)
+  order by p.id for update;
+
   for v_move in
     select e.value from jsonb_array_elements(coalesce(p_payload -> 'movements', '[]'::jsonb)) with ordinality as e(value, n) order by e.n
   loop
     -- Applied on an earlier attempt: don't take the stock twice.
     continue when exists (select 1 from public.stock_movements m where m.id = (v_move ->> 'id')::uuid);
+    v_moved_at := case when v_clamped then v_when else (v_move ->> 'client_created_at')::timestamptz end;
 
-    -- A batch this server never received (a stale terminal copy) shouldn't
-    -- block the sale; the movement is kept unallocated.
-    v_batch_id := pos.uuid_or_null(v_move ->> 'batch_id');
-    if v_batch_id is not null and not exists (select 1 from public.stock_batches b where b.id = v_batch_id) then
-      v_batch_id := null;
+    -- The terminal chose the batch from its own copy. What the batch no
+    -- longer has (another till sold it first, or it filled an order), or a
+    -- batch this server never received, goes on order instead: a count
+    -- never goes below 0. The row lock serializes tills drawing from one batch.
+    v_want := -(v_move ->> 'delta')::numeric;
+    select least(greatest(b.qty_good_remaining, 0), v_want) into v_take
+    from public.stock_batches b where b.id = pos.uuid_or_null(v_move ->> 'batch_id') for update;
+    v_take := coalesce(v_take, 0);
+
+    if v_take > 0 then
+      update public.stock_batches set qty_good_remaining = qty_good_remaining - v_take where id = (v_move ->> 'batch_id')::uuid;
+      insert into public.stock_movements (id, product_id, batch_id, terminal_id, delta, reason, reference_id, actor_id, note, client_created_at)
+      values ((v_move ->> 'id')::uuid, (v_move ->> 'product_id')::uuid, (v_move ->> 'batch_id')::uuid, v_move ->> 'terminal_id',
+              -v_take, 'sale', (v_move ->> 'reference_id')::uuid, (v_move ->> 'actor_id')::uuid, v_move ->> 'note', v_moved_at);
     end if;
-
-    insert into public.stock_movements (id, product_id, batch_id, terminal_id, delta, reason, reference_id, actor_id, note, client_created_at)
-    values (
-      (v_move ->> 'id')::uuid, (v_move ->> 'product_id')::uuid, v_batch_id, v_move ->> 'terminal_id',
-      (v_move ->> 'delta')::numeric, coalesce(v_move ->> 'reason', 'sale'), (v_move ->> 'reference_id')::uuid,
-      (v_move ->> 'actor_id')::uuid, v_move ->> 'note',
-      case when v_clamped then v_when else (v_move ->> 'client_created_at')::timestamptz end);
-
-    continue when v_batch_id is null;
-
-    -- The row lock serializes two online terminals drawing from one batch.
-    -- Two offline ones may both have sold from it; the sale already happened,
-    -- so it's applied and the oversell is flagged for the owner.
-    update public.stock_batches set qty_good_remaining = qty_good_remaining + (v_move ->> 'delta')::numeric
-    where id = v_batch_id
-    returning qty_good_remaining into v_left;
-
-    if v_left < 0 then
-      insert into public.audit_logs (terminal_id, actor_id, action_type, entity_type, entity_id, details, client_created_at)
-      values (coalesce(v_sale ->> 'terminal_id', 'unknown'), (v_move ->> 'actor_id')::uuid, 'batch_oversold', 'stock_batch', v_batch_id,
-              jsonb_build_object('oversold_by', abs(v_left), 'movement_id', v_move ->> 'id'), v_when);
+    if v_want > v_take then
+      insert into public.stock_movements (id, product_id, batch_id, terminal_id, delta, reason, reference_id, actor_id, note, client_created_at)
+      values (case when v_take > 0 then gen_random_uuid() else (v_move ->> 'id')::uuid end, (v_move ->> 'product_id')::uuid, null,
+              v_move ->> 'terminal_id', v_take - v_want, 'on_order', (v_move ->> 'reference_id')::uuid, (v_move ->> 'actor_id')::uuid,
+              v_move ->> 'note', v_moved_at);
     end if;
   end loop;
+
+  -- Stock the terminal didn't know about yet (a delivery at another till)
+  -- fills what just went on order, after any older order.
+  perform pos.fill_orders(p.id) from public.products p
+  where p.id in (select pos.uuid_or_null(i ->> 'product_id') from jsonb_array_elements(p_payload -> 'items') as i);
 
   -- Sold for less than the item's price, and the price wasn't changed around
   -- then (a till that hadn't heard of a new price yet): the app never does
@@ -965,6 +1038,8 @@ begin
     values (v_batch.product_id, v_batch.id, p_payload ->> 'terminal_id', v_batch.qty_good_remaining + v_batch.qty_damaged,
             'stock_receipt', v_batch.id, v_batch.created_by, v_batch.client_created_at);
   end if;
+
+  perform pos.fill_orders(v_batch.product_id);
 end $$;
 
 -- One outbox item. Logs, payments and pick lists are insert-only (a retried
@@ -1422,13 +1497,15 @@ begin
     'on_shift', (select coalesce(jsonb_agg(jsonb_build_object('name', u.full_name, 'started_at', sh.started_at) order by sh.started_at desc), '[]'::jsonb)
                  from public.shift_logs sh left join public.users u on u.id = sh.cashier_id
                  where sh.status = 'open'),
-    -- Voided sales don't count as sold.
+    -- Voided sales don't count as sold. What went on order counts when it
+    -- was sold; filling it later nets to nothing.
     'top_selling', (select coalesce(jsonb_agg(to_jsonb(t) order by t.units_sold desc, t.name), '[]'::jsonb) from (
-                      select p.id, p.name, p.unit, sum(abs(m.delta)) as units_sold
+                      select p.id, p.name, p.unit, sum(-m.delta) as units_sold
                       from public.stock_movements m join public.products p on p.id = m.product_id
-                      where m.reason = 'sale' and m.client_created_at >= v_start and m.client_created_at < v_end
+                      where m.reason in ('sale', 'on_order') and m.client_created_at >= v_start and m.client_created_at < v_end
                         and not exists (select 1 from public.sales s where s.id = m.reference_id and s.status = 'voided')
                       group by p.id, p.name, p.unit
+                      having sum(-m.delta) > 0
                       order by units_sold desc, p.name
                       limit 5) t),
     -- In stock but unsold for 30 days, most money tied up first.
@@ -1468,12 +1545,13 @@ begin
         'id', r.id, 'sku', r.sku, 'name', r.name, 'category_id', r.category_id, 'unit', r.unit,
         'unit_price', r.unit_price, 'reorder_level', r.reorder_level, 'is_active', r.is_active,
         'store_good', r.store_good, 'warehouse_good', r.warehouse_good, 'damaged', r.damaged,
-        'low_stock', r.store_good + r.warehouse_good <= r.reorder_level) order by r.name), '[]'::jsonb)
+        'low_stock', r.store_good + r.warehouse_good <= r.reorder_level, 'on_order', r.on_order) order by r.name), '[]'::jsonb)
     from (
       select p.id, p.sku, p.name, p.category_id, p.unit, p.unit_price, p.reorder_level, p.is_active,
              coalesce(sum(b.qty_good_remaining) filter (where b.location = 'store'), 0) as store_good,
              coalesce(sum(b.qty_good_remaining) filter (where b.location = 'warehouse'), 0) as warehouse_good,
-             coalesce(sum(b.qty_damaged), 0) as damaged
+             coalesce(sum(b.qty_damaged), 0) as damaged,
+             coalesce((select -sum(m.delta) from public.stock_movements m where m.product_id = p.id and m.reason = 'on_order'), 0) as on_order
       from public.products p
       left join public.stock_batches b on b.product_id = p.id and (b.qty_good_remaining <> 0 or b.qty_damaged > 0)
       where v_archived or p.is_active
@@ -1611,6 +1689,7 @@ declare
   v_store numeric;
   v_warehouse numeric;
   v_delta numeric;
+  v_filled numeric := 0;
   v_changed text[] := '{}';
 begin
   v_user := pos.require_owner(auth);
@@ -1661,6 +1740,11 @@ begin
         jsonb_build_object('product_name', v_after.name, 'location', 'warehouse', 'delta', v_delta));
     end if;
   end if;
+  -- After both counts: filling from the store's could reach into the
+  -- warehouse's, which a count set afterwards would undo.
+  if v_store is not null or v_warehouse is not null then
+    v_filled := pos.fill_orders(v_after.id);
+  end if;
 
   if v_price is not null and v_price <> v_before.unit_price then
     perform pos.record_activity(auth, v_user.id, 'price_changed', 'product', v_after.id,
@@ -1687,7 +1771,8 @@ begin
   end if;
 
   return jsonb_build_object('id', v_after.id, 'sku', v_after.sku, 'name', v_after.name, 'unit', v_after.unit,
-    'unit_price', v_after.unit_price, 'reorder_level', v_after.reorder_level, 'is_active', v_after.is_active);
+    'unit_price', v_after.unit_price, 'reorder_level', v_after.reorder_level, 'is_active', v_after.is_active,
+    'filled_orders', v_filled);
 end $$;
 
 -- ---------------------------------------------------------------------------
@@ -2060,6 +2145,7 @@ begin
           case when v_condition = 'good' then v_quantity else 0 end,
           case when v_condition = 'damaged' then v_quantity else 0 end,
           'return_accepted', v_return.id, v_user.id, v_when);
+  perform pos.fill_orders(v_product.id);
 
   insert into public.audit_logs (terminal_id, actor_id, approver_id, action_type, entity_type, entity_id, details, client_created_at)
   values (coalesce(nullif(auth ->> 'terminal_id', ''), 'unknown'), v_user.id, v_user.id, 'return_accepted', 'sales_return', v_return.id,
