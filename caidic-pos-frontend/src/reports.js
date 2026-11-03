@@ -8,6 +8,7 @@
 
 import { fetchSalesReport, flushOutbox } from './sync-worker.js';
 import { withServerAuth } from './session.js';
+import { searchMatcher } from './input-handler.js';
 import { $, esc, peso, qty, countTo, downloadCsv } from './ui.js';
 import { PERIODS, rangeName, emptyText, count, sales, share, localDate, fmt, salesTrend, donut, heatmap, barList } from './charts.js';
 
@@ -262,8 +263,9 @@ function drawSkus() {
   const total = Number(report.totals.amount);
   const key = SKU_SORT[skus.sort];
   const words = skus.search.trim().toLowerCase();
+  const isMatch = searchMatcher(words);
   const rows = report.items
-    .filter((x) => !words || `${x.sku ?? ''} ${x.name}`.toLowerCase().includes(words))
+    .filter((x) => isMatch(`${x.sku ?? ''} ${x.name}`))
     .sort((a, b) => {
       const [va, vb] = [key(a), key(b)];
       const order = typeof va === 'string' ? va.localeCompare(vb) : va - vb;

@@ -41,7 +41,7 @@ const terminalKey = (await one(`select pos.add_terminal('Front counter') as k`))
 
 const local = await import(new URL('local-db.js', APP));
 const sync = await import(new URL('sync-worker.js', APP));
-const { verifyStaffLogin, findExactProduct, makeCartLine } = await import(new URL('input-handler.js', APP));
+const { verifyStaffLogin, findExactProduct, makeCartLine, searchProducts } = await import(new URL('input-handler.js', APP));
 const { verifyTotp } = await import(new URL('totp.js', APP));
 const { db } = local;
 
@@ -55,6 +55,16 @@ check('device has the catalog', (await db.products.count()) === 194 && (await db
 const lastRequest = requests.at(-1);
 check('request shape: { auth, args }', lastRequest.fn === 'pos_catalog' && lastRequest.body.auth.terminal_key === terminalKey && 'since' in lastRequest.body.args && typeof lastRequest.body.auth.terminal_id === 'string', lastRequest.body);
 check('publishable key sent as apikey only', lastRequest.headers.apikey === 'sb_publishable_test' && !lastRequest.headers.Authorization, lastRequest.headers);
+
+// --- search in English or Bisaya -------------------------------------------
+const found = async (query) => (await searchProducts(query)).map((p) => p.sku).sort().join(' ');
+const rebars = 'BAR-001 BAR-002 BAR-003 BAR-004 BAR-005 BAR-006';
+check('Bisaya search: kabelya, kabilya, and kabil (still typing) find the rebar', await found('rebar') === rebars
+  && await found('kabelya') === rebars && await found('Kabilya') === rebars && await found('kabil') === rebars, await found('kabelya'));
+check('...words in any order: tubo pvc baga is the thick PVC pipes', await found('tubo pvc baga') === 'PVC-001 PVC-003 PVC-010 PVC-012 PVC-014', await found('tubo pvc baga'));
+check('...lansang finds the CWN too, and stainless lababo the wash basin', await found('lansang #3') === 'NAIL-005 NAIL-010'
+  && await found('stainless lababo') === 'BATH-001', [await found('lansang #3'), await found('stainless lababo')]);
+check('...English and SKUs as before', await found('rebar 10') === 'BAR-004' && await found('bar-004') === 'BAR-004' && await found('zzz') === '');
 
 // --- sign in, offline then online ---------------------------------------
 const signIn = await verifyStaffLogin(cashierId, '1234');
