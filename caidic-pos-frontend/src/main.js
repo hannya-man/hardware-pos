@@ -40,15 +40,15 @@ const NAV = [
   ] },
   { section: 'Daily work', items: [
     { key: 'billing', label: 'Sell', icon: 'cart', roles: EVERYONE, render: renderBilling,
-      help: 'Scan, search, or tap items to add them, then Charge. Search works in English or Bisaya (kabilya, tubo, lansang). Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready. With a second monitor facing the customer, the screen button beside the order opens the customer screen there.' },
+      help: 'Scan, search, or tap items to add them, then Charge. Search works in English or Bisaya (kabilya, tubo, lansang). You can sell more than is in stock: the rest goes on order and comes off the next stock that arrives. Customers can pay cash, GCash/PayMaya, or on credit (utang). Prices shown are final. Every sale goes to the pick lists so the stockroom can get the items ready. With a second monitor facing the customer, the screen button beside the order opens the customer screen there.' },
     { key: 'credit', label: 'Credit (utang)', icon: 'wallet', roles: EVERYONE, render: renderCredit,
       help: 'Customers who bought on credit and how much each one still owes. Record a payment when they pay. If they hand over more cash than they owe, the balance is paid off and the change to give back is shown.' },
     { key: 'materialRequests', label: 'Pick lists', icon: 'clipboard', roles: EVERYONE, render: renderMaterialRequests,
-      help: 'What the stockroom has to get ready. Every sale shows up here on its own, with the Ref no. from its slip. Tap Print for a pick slip to work from, and Mark picked up once the customer has the items. You can also send a list without charging, for a big order or a delivery.' },
+      help: 'What the stockroom has to get ready. Every sale shows up here on its own, with the Ref no. from its slip. Tap Print for a pick slip to work from, and Mark picked up once the customer has the items. Items marked waiting for stock were sold on order: hand them over when the stock arrives. You can also send a list without charging, for a big order or a delivery.' },
   ] },
   { section: 'Store', items: [
     { key: 'stock', label: 'Stock', icon: 'box', roles: OWNER, render: renderStock,
-      help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count.' },
+      help: 'Every item, how many are in the store and the warehouse, and what that stock is worth. Tap Edit to change a price or a count. Counts never go below 0: an item sold with no stock left shows how many are on order, and stock that comes in (a delivery, a higher count, a return) goes to those orders first.' },
     { key: 'sales', label: 'Sales', icon: 'bag', roles: OWNER, render: renderSales,
       help: 'Every sale, with its items and how it was paid. Tap a sale to see it. To void one, a second owner has to approve within 10 minutes, or the sale stays as it is.' },
     { key: 'reports', label: 'Sales report', icon: 'chart', roles: OWNER, render: renderReports,

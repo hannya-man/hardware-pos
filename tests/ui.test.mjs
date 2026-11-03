@@ -158,13 +158,19 @@ try {
   customerScreen.postMessage('hello');
   await waitFor('the Sell screen to answer the customer screen', () => shown.some((m) => Array.isArray(m?.lines)));
 
-  // A cash sale: two items, one tapped twice.
+  // A cash sale: two items, one tapped twice. The other has run out, here
+  // and on the server: it's sold anyway, and goes on order.
   const tiles = await waitFor('items on the Sell screen', () => { const t = $('grid').querySelectorAll('[data-id]'); return t.length > 100 && t; });
+  const soldOut = tiles[5].dataset.id;
+  await server.query(`update public.stock_batches set qty_good_remaining = 0 where product_id = $1`, [soldOut]);
+  await appDb.db.stock_batches.where('product_id').equals(soldOut).modify({ qty_good_remaining: 0 });
   tiles[0].click();
   tiles[0].click();
   tiles[5].click();
   await waitFor('two lines in the order', () => $('lines').querySelectorAll('.line').length === 2);
   check('a formula-like item name shows as plain text', $('lines').textContent.includes('=HYPERLINK('));
+  check('an item with no stock left can still be sold; its line says it goes on order', !$('lines').querySelectorAll('.line')[0].querySelector('.on-order')
+    && $('lines').querySelectorAll('.line')[1].querySelector('.on-order')?.textContent === 'Out of stock: 1 on order', $('lines').textContent);
   // On a phone the order is out of sight: the bar at the bottom counts it,
   // and each item in it shows how many.
   check('the order bar shows the count and the total', !$('cartBar').classList.contains('is-empty')
@@ -181,6 +187,11 @@ try {
   await waitFor('the cash handed over, on the customer screen', () => shown.at(-1)?.payment?.method === 'cash' && shown.at(-1).payment.tendered === 5000);
   $('checkoutDoneBtn').click();
   await waitFor('the sale to reach the server', async () => (await one(`select count(*)::int n from public.sales`)).n === 1);
+  check('after charging: taken from stock, and a warning that the sold-out item is at 0 with 1 on order', toasts().includes('Taken from stock')
+    && toasts().includes('Now at 0 in stock: Rebar 7mm (1 pc on order)'), toasts());
+  const held = await one(`select (select sum(qty_good_remaining)::float from public.stock_batches where product_id = $1) as stock,
+    (select -sum(delta)::float from public.stock_movements where product_id = $1 and reason = 'on_order') as on_order`, [soldOut]);
+  check('...and the server keeps its count at 0, with 1 on order', held.stock === 0 && held.on_order === 1, held);
   await waitFor('the thank-you on the customer screen', () => shown.at(-1)?.thanks?.tendered === 5000 && shown.at(-1).thanks.total === onScreen.total);
   check('a finished sale empties the bar and closes the order', $('cartBar').classList.contains('is-empty')
     && !$('viewBilling').classList.contains('order-open') && !$('grid').querySelector('[data-qty]'));
@@ -213,6 +224,8 @@ try {
   doc.dispatchEvent(new window.KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
   check('Escape closes the menu', !$('appShell').classList.contains('nav-open'));
   await waitFor('two pick lists', () => rows('materialRequestsTable').length === 2);
+  check('the pick list marks what is waiting for stock', rows('materialRequestsTable').some((r) => r.textContent.includes('Rebar 7mm 1 waiting for stock')),
+    rows('materialRequestsTable').map((r) => r.textContent.replace(/\s+/g, ' ')));
   rows('materialRequestsTable')[0].querySelector('[data-action="fulfill"]').click();
   await waitFor('a list marked picked up', async () => (await one(`select count(*)::int n from public.material_requests where status = 'fulfilled'`)).n === 1);
 
@@ -289,6 +302,9 @@ try {
   for (const screen of ['stock', 'sales', 'shifts', 'returns', 'staff', 'audit']) await openScreen(screen);
   await openScreen('stock');
   await waitFor('stock rows', () => rows('stockTable').length > 100);
+  const soldOutRow = rows('stockTable').find((r) => r.textContent.includes('Rebar 7mm'));
+  check('stock: the sold-out item shows 0, and a warning with 1 on order', soldOutRow?.querySelector('.on-order')?.textContent === '1 on order'
+    && soldOutRow.children[2].textContent.startsWith('0'), soldOutRow?.textContent.replace(/\s+/g, ' '));
   type($('stockSearch'), 'kabelya');
   check('stock: a Bisaya search finds the items by their English names', rows('stockTable').length === 6
     && rows('stockTable').every((r) => r.textContent.includes('Rebar')), rows('stockTable').map((r) => r.textContent.replace(/\s+/g, ' ')));

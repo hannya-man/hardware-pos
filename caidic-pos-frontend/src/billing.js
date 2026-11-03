@@ -156,6 +156,7 @@ function drawCart() {
           <div class="line-info">
             <span class="line-name">${esc(line.name_snapshot)}</span>
             <span class="line-price">${peso(line.unit_price_snapshot)} / ${esc(line.unit_snapshot)}</span>
+            ${shortNote(line)}
           </div>
           <span class="line-total">${peso(line.line_total)}</span>
           <div class="stepper">
@@ -176,6 +177,15 @@ function drawCart() {
   markTiles();
   if (checkoutTotal !== null) drawCheckout();
   tellCustomer();
+}
+
+// More than is in stock can be sold: the rest goes on order, and the
+// stockroom hands it over when stock arrives (sync-worker.js).
+function shortNote(line) {
+  const short = round3(line.quantity - line.in_stock);
+  if (!(short > 0)) return '';
+  const text = line.in_stock > 0 ? `Only ${qty(line.in_stock)} in stock, ${qty(short)} on order` : `Out of stock: ${qty(short)} on order`;
+  return `<span class="line-warn on-order">${icon('alert')}${esc(text)}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -494,17 +504,19 @@ async function finishSale(print) {
 
     const lines = [...cart];
     const total = checkoutTotal;
-    const saleId = await completeSale({ cashier_id: session.user.id, shift_id: session.shiftId, cart: lines, payment });
+    const { id: saleId, stock } = await completeSale({ cashier_id: session.user.id, shift_id: session.shiftId, cart: lines, payment });
     closeCheckout();
     clearCart();
     tellCustomer({ thanks: { total, method, tendered: method === 'cash' ? payment.tendered : null } });
     flushOutbox().catch(() => {}); // the sale and its pick list go out now when online, not on the next sync
-    if (print) printSaleSlip(saleId, lines, METHOD_LABELS[method], method === 'credit' ? customer.name : null);
+    if (print) printSaleSlip(saleId, lines, stock, METHOD_LABELS[method], method === 'credit' ? customer.name : null);
 
     const outcome = method === 'cash' ? (payment.tendered > total ? `Sale complete. Change: ${peso(payment.tendered - total)}.` : 'Sale complete.')
       : method === 'credit' ? `${peso(total - payment.paid)} added to ${customer.name}'s credit.`
       : `Sale complete. Paid by ${METHOD_LABELS[method]}.`;
-    toast(`${outcome} The items are on the pick list.`); // completeSale sends them to the stockroom
+    const taken = stock.some((s, i) => s.on_order < lines[i].quantity);
+    toast(`${outcome} ${taken ? 'Taken from stock, and the items are' : 'The items are'} on the pick list.`); // completeSale sends them to the stockroom
+    warnRunOut(stock);
   } catch (err) {
     setStatus('checkoutStatus', `Couldn't complete the sale. ${err.message}`, 'err');
   } finally {
@@ -512,8 +524,17 @@ async function finishSale(print) {
   }
 }
 
+// Items this sale took the last of, and how much of each went on order.
+function warnRunOut(stock) {
+  const out = stock.filter((s) => s.left <= 0);
+  if (!out.length) return;
+  const names = out.map((s) => (s.on_order > 0 ? `${s.name} (${qty(s.on_order)} ${s.unit} on order)` : s.name));
+  const later = out.some((s) => s.on_order > 0) ? ' What is on order comes off the next stock that arrives.' : '';
+  toast(`Now at 0 in stock: ${names.join(', ')}.${later}`, 'warn');
+}
+
 // The customer's stock-out slip. Its Ref no. matches the sale's pick list.
-function printSaleSlip(saleId, lines, paymentLabel, customerName) {
+function printSaleSlip(saleId, lines, stock, paymentLabel, customerName) {
   printSlip({
     title: 'Stock-out slip',
     facts: [
@@ -523,7 +544,8 @@ function printSaleSlip(saleId, lines, paymentLabel, customerName) {
       ['Payment', paymentLabel],
       ['Customer', customerName],
     ],
-    lines: lines.map((l) => ({ quantity: l.quantity, unit: l.unit_snapshot, name: l.name_snapshot })),
+    lines: lines.map((l, i) => ({ quantity: l.quantity, unit: l.unit_snapshot,
+      name: stock[i].on_order > 0 ? `${l.name_snapshot} (${qty(stock[i].on_order)} to follow when stock arrives)` : l.name_snapshot })),
     checkLabel: 'Out',
     signatures: ['Released by', 'Received by'],
     footer: 'Thank you for shopping at RRC Merchandise!',

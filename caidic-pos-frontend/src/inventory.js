@@ -81,7 +81,8 @@ function drawStock() {
         <span class="cell-sub">${esc(r.sku)}${r.damaged > 0 ? ` · <span class="text-bad">${qty(r.damaged)} damaged</span>` : ''}</span>
       </td>
       <td class="num">${peso(r.unit_price)}<span class="cell-sub">per ${esc(r.unit)}</span></td>
-      <td class="num">${qty(r.store_good)}</td>
+      <td class="num">${qty(r.store_good)}${r.on_order > 0
+        ? `<span class="cell-sub on-order" title="Sold with no stock left: taken from the next stock that arrives">${icon('alert')}${qty(r.on_order)} on order</span>` : ''}</td>
       <td class="num">${qty(r.warehouse_good)}</td>
       <td class="num">${peso(value(r, totalQty(r)))}</td>
       <td>${stockBadge(r)}</td>
@@ -147,9 +148,10 @@ $('editItemSubmitBtn').addEventListener('click', async () => {
   if (warehouse !== editing.warehouse_good) payload.warehouse_qty = warehouse;
 
   try {
-    await withServerAuth(() => updateProduct(editing.id, payload));
+    const saved = await withServerAuth(() => updateProduct(editing.id, payload));
     closeModal('editItemOverlay');
-    toast(`${name} saved.`);
+    const filled = Number(saved?.filled_orders ?? 0);
+    toast(`${name} saved.${filled > 0 ? ` ${qty(filled)} ${saved.unit} went to the orders waiting for it.` : ''}`);
     await refreshCatalog();
     await loadStock();
   } catch (err) {
@@ -287,7 +289,8 @@ $('receiveSubmitBtn').addEventListener('click', async () => {
   });
   log('stock_received', { entity_type: 'product', entity_id: deliveryProduct.id, details: { name: deliveryProduct.name, quantity, location: deliveryLocation } });
   closeModal('receiveOverlay');
-  toast(`Added ${qty(quantity - damaged)} ${deliveryProduct.unit} of ${deliveryProduct.name} to the ${deliveryLocation}.`);
+  const waiting = Math.min(stockRows.find((r) => r.id === deliveryProduct.id)?.on_order ?? 0, quantity - damaged);
+  toast(`Added ${qty(quantity - damaged)} ${deliveryProduct.unit} of ${deliveryProduct.name} to the ${deliveryLocation}.${waiting > 0 ? ` ${qty(waiting)} go to the orders waiting for it.` : ''}`);
   await pushNow();
   await loadStock();
 });
@@ -414,7 +417,7 @@ async function loadMaterialRequests(quiet = false) {
     return;
   }
 
-  const shown = lists.map((r) => `${r.id}:${r.status}:${r.sale?.status ?? ''}`).join();
+  const shown = lists.map((r) => `${r.id}:${r.status}:${r.sale?.status ?? ''}:${r.items.map((i) => i.on_order ?? 0).join('/')}`).join();
   if (quiet && shown === shownLists) return;
   shownLists = shown;
   pickLists = lists;
@@ -438,7 +441,8 @@ function pickListRow(r) {
     <tr class="${r.status === 'pending' && !voided ? '' : 'is-muted'}">
       <td class="nowrap">${fmtTime(r.client_created_at)}</td>
       <td>${forWho}</td>
-      <td>${r.items.map((i) => `<strong>${qty(i.quantity_requested)}${i.unit_snapshot ? ` ${esc(i.unit_snapshot)}` : ''}</strong> ${esc(i.name_snapshot)}`).join('<br>')}</td>
+      <td>${r.items.map((i) => `<strong>${qty(i.quantity_requested)}${i.unit_snapshot ? ` ${esc(i.unit_snapshot)}` : ''}</strong> ${esc(i.name_snapshot)}${i.on_order > 0
+        ? ` <span class="on-order">${icon('alert')}${qty(i.on_order)} waiting for stock</span>` : ''}`).join('<br>')}</td>
       <td>${esc(r.notes ?? '')}</td>
       <td class="actions">${action}</td>
     </tr>`;
@@ -460,7 +464,8 @@ function printPickSlip(r) {
       ['Picked up', r.status === 'fulfilled' ? [fmtDateTime(r.fulfilled_at), r.fulfilled_by?.full_name].filter(Boolean).join(' · ') : null],
       ['Printed', `${fmtDateTime(new Date())} · ${session.user.full_name}`],
     ],
-    lines: r.items.map((i) => ({ quantity: i.quantity_requested, unit: i.unit_snapshot, name: i.name_snapshot })),
+    lines: r.items.map((i) => ({ quantity: i.quantity_requested, unit: i.unit_snapshot,
+      name: i.on_order > 0 ? `${i.name_snapshot} (${qty(i.on_order)} to follow when stock arrives)` : i.name_snapshot })),
     checkLabel: 'Picked',
     note: r.notes,
     signatures: ['Picked by', 'Received by'],

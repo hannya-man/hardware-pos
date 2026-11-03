@@ -170,22 +170,25 @@ export async function recordFailedSignIn({ user_id, step, locked = false }) {
   });
 }
 
-// FIFO: each sale line draws from this device's copy of the store's batches,
-// oldest first, and tags every movement with the batch it came from (that is
-// what lets a later void put the stock back). A shortfall (stale copy or a
-// real oversell) is still recorded; the server flags it for the owner.
+// FIFO: each sale line draws from this device's copy of the item's batches,
+// the store's before the warehouse's, oldest first, and tags every movement
+// with the batch it came from (that is what lets a later void put the stock
+// back). What there isn't goes on order: the count stops at 0, and the
+// server fills the order from the next stock that comes in.
 async function allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, client_created_at }) {
   let remaining = round3(Math.abs(line.quantity));
   const movements = [];
-  const movement = (batch_id, delta) => ({
+  const movement = (batch_id, delta, reason = 'sale') => ({
     id: crypto.randomUUID(), product_id: line.product_id, batch_id, terminal_id,
-    delta, reason: 'sale', reference_id: sale_id, actor_id: cashier_id, client_created_at,
+    delta, reason, reference_id: sale_id, actor_id: cashier_id, client_created_at,
   });
 
-  const batches = await db.stock_batches
+  const batches = (await db.stock_batches
     .where('product_id').equals(line.product_id)
-    .and((b) => b.location === 'store' && b.qty_good_remaining > 0)
-    .sortBy('received_at');
+    .and((b) => b.qty_good_remaining > 0)
+    .sortBy('received_at'))
+    .sort((a, b) => (a.location === 'warehouse') - (b.location === 'warehouse'));
+  let left = round3(batches.reduce((sum, b) => sum + b.qty_good_remaining, 0));
 
   for (const batch of batches) {
     if (remaining <= 0) break;
@@ -194,15 +197,11 @@ async function allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, c
     movements.push(movement(batch.id, -take));
     await db.stock_batches.update(batch.id, { qty_good_remaining: round3(batch.qty_good_remaining - take) });
     remaining = round3(remaining - take);
+    left = round3(left - take);
   }
 
-  if (remaining > 0) {
-    const last = movements.at(-1);
-    if (last) last.delta = round3(last.delta - remaining);
-    else movements.push(movement(null, -remaining));
-  }
-
-  return movements;
+  if (remaining > 0) movements.push(movement(null, -remaining, 'on_order'));
+  return { movements, onOrder: remaining, left };
 }
 
 // No VAT is added here on purpose: this is not a BIR-accredited POS and the
@@ -249,13 +248,16 @@ export async function completeSale({ cashier_id, shift_id, cart, payment }) {
     status: 'pending', client_created_at,
   };
 
+  const stock = []; // each line's part on order and what's left, for the cashier and the slip
   await db.transaction('rw', [db.sales, db.sale_items, db.stock_movements, db.stock_batches, db.material_requests, db.outbox_queue], async () => {
     await db.sales.add(sale);
     await db.sale_items.bulkAdd(items);
 
     const movements = [];
     for (const line of cart) {
-      movements.push(...await allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, client_created_at }));
+      const taken = await allocateSaleMovements({ line, terminal_id, sale_id, cashier_id, client_created_at });
+      movements.push(...taken.movements);
+      stock.push({ product_id: line.product_id, name: line.name_snapshot, unit: line.unit_snapshot, on_order: taken.onOrder, left: taken.left });
     }
 
     await db.stock_movements.bulkAdd(movements);
@@ -269,7 +271,7 @@ export async function completeSale({ cashier_id, shift_id, cart, payment }) {
     details: { total_amount, item_count: cart.length, payment_method: method },
   });
 
-  return sale_id;
+  return { id: sale_id, stock };
 }
 
 export async function receiveStock({ product_id, location, quantity, damaged_quantity = 0, actor_id }) {

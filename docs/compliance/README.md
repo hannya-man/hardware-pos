@@ -47,7 +47,7 @@ runs on in the store, and the people who use and run it.
   payments and logs can't be edited or deleted.
 - **Records.** Each shift has a timeline of everything done in it. The Audit
   log screen lists what needs an owner's eyes: wrong passwords, cash
-  differences, voids, overselling, returns, and wrong device clocks. Both can
+  differences, voids, returns, and wrong device clocks. Both can
   be downloaded.
 - **Sign-ins.** Five wrong passwords lock an account for a minute, and
   reloading the page doesn't reset the count. Server sign-ins end after 12

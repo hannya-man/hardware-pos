@@ -104,6 +104,9 @@ export async function makeCartLine(productId) {
 
   const category = product.category_id ? await db.categories.get(product.category_id) : null;
   const price = Number(product.unit_price);
+  // Store and warehouse, on this device's copy: whatever is sold beyond this goes on order.
+  const batches = await db.stock_batches.where('product_id').equals(product.id).toArray();
+  const inStock = Math.round(batches.reduce((sum, b) => sum + Math.max(0, b.qty_good_remaining), 0) * 1000) / 1000;
 
   return {
     product_id: product.id,
@@ -115,6 +118,7 @@ export async function makeCartLine(productId) {
     quantity: 1,
     line_discount: 0,
     line_total: price,
+    in_stock: inStock,
   };
 }
 
