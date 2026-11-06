@@ -90,7 +90,7 @@ jobs:
               exit 1 ;;
           esac
 
-      - uses: supabase/setup-cli@45a513f8c64c0bc8e0e3dfe572b5c95be85f6359 # v3.0.1
+      - uses: supabase/setup-cli@d239d1052f6f024a8d746d7e5aeddead63b9cb53 # v3.1.0
         with:
           # Pinned: a new CLI release only gets the database password once it has
           # been out a while. Move it on by hand, to a release at least a week old.
