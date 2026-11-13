@@ -7,7 +7,7 @@
     "test": "node sql.test.mjs && node app.test.mjs && node sw.test.mjs && node ui.test.mjs && node customer.test.mjs"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.5.13",
+    "@electric-sql/pglite": "0.5.15",
     "bcryptjs": "3.0.3",
     "dexie": "4.4.7",
     "fake-indexeddb": "6.2.7",
